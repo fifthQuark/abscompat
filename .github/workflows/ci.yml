@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Lint + unit tests (PHP ${{ matrix.php }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Nextcloud 33 needs PHP >= 8.2, Nextcloud 35 >= 8.3; all support up to 8.5.
+        php: ['8.2', '8.3', '8.4', '8.5']
+    defaults:
+      run:
+        working-directory: abscompat
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          tools: composer
+          coverage: none
+      - run: composer install --no-interaction --no-progress
+      - name: PHP lint
+        run: find lib tests -name '*.php' -print0 | xargs -0 -n1 php -l > /dev/null
+      - name: PHPUnit
+        run: vendor/bin/phpunit -c tests/phpunit.xml
+      - name: Validate appinfo/info.xml
+        run: |
+          sudo apt-get -qq install -y libxml2-utils > /dev/null
+          curl -sSfL https://apps.nextcloud.com/schema/apps/info.xsd -o /tmp/info.xsd
+          xmllint --noout --schema /tmp/info.xsd appinfo/info.xml
+
+  integration:
+    name: Nextcloud ${{ matrix.nextcloud }}
+    runs-on: ubuntu-latest
+    needs: unit
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep in line with <nextcloud min-version/max-version> in appinfo/info.xml.
+        nextcloud: ['33', '34', '35']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          tools: composer
+          coverage: none
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Tools
+        run: sudo apt-get -qq update && sudo apt-get -qq install -y ffmpeg zip rsync > /dev/null
+      - name: Build release tarball
+        run: abscompat/build-release.sh
+      - name: CrossPoint Sync checkout (for its real connector)
+        run: |
+          git clone --depth 1 https://github.com/crosspoint-reader/crosspoint-sync /tmp/crosspoint-sync
+          cd /tmp/crosspoint-sync && npm ci --ignore-scripts --no-audit --no-fund
+      - name: Install in Nextcloud and run e2e suites
+        env:
+          DOCKER: docker
+          CROSSPOINT_DIR: /tmp/crosspoint-sync
+        run: dev/test-matrix.sh abscompat/build/abscompat-*.tar.gz ${{ matrix.nextcloud }}
+      - uses: actions/upload-artifact@v4
+        if: matrix.nextcloud == '34'
+        with:
+          name: abscompat-tarball
+          path: abscompat/build/abscompat-*.tar.gz

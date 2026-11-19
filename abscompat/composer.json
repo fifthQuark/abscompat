@@ -1,0 +1,37 @@
+{
+  "name": "abscompat/abscompat",
+  "description": "Audiobookshelf-compatible API for Nextcloud",
+  "license": "AGPL-3.0-or-later",
+  "type": "project",
+  "require": {
+    "php": ">=8.2",
+    "james-heinrich/getid3": "^1.9"
+  },
+  "require-dev": {
+    "phpunit/phpunit": "^10.5",
+    "nextcloud/ocp": "dev-stable33"
+  },
+  "autoload": {
+    "psr-4": {
+      "OCA\\AbsCompat\\": "lib/"
+    }
+  },
+  "config": {
+    "optimize-autoloader": true,
+    "classmap-authoritative": false,
+    "platform": {
+      "php": "8.2"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "OCA\\AbsCompat\\Tests\\": "tests/"
+    }
+  },
+  "scripts": {
+    "test": "phpunit -c tests/phpunit.xml",
+    "lint": "find lib tests -name '*.php' -print0 | xargs -0 -n1 php -l"
+  },
+  "minimum-stability": "stable",
+  "prefer-stable": true
+}

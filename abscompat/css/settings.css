@@ -1,0 +1,16 @@
+.abscompat textarea { width: 100%; max-width: 600px; font-family: var(--font-face-monospace, monospace); }
+.abscompat .abscompat-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+.abscompat .abscompat-status { color: var(--color-text-maxcontrast); }
+.abscompat .abscompat-url, .abscompat .abscompat-newkey code { word-break: break-all; user-select: all; padding: 4px 8px; border-radius: var(--border-radius); background: var(--color-background-dark); }
+.abscompat .abscompat-steps { list-style: disc; padding-inline-start: 20px; max-width: 700px; color: var(--color-text-maxcontrast); }
+.abscompat .abscompat-steps li { margin: 2px 0; }
+.abscompat .abscompat-newkey { margin: 8px 0; padding: 8px 12px; border-radius: var(--border-radius-large); background: var(--color-primary-element-light); max-width: 700px; }
+.abscompat .abscompat-list { max-width: 700px; margin: 8px 0; }
+.abscompat .abscompat-list li { display: flex; align-items: center; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--color-border); }
+.abscompat .abscompat-list li:last-child { border-bottom: 0; }
+.abscompat .abscompat-list .abscompat-path { font-weight: bold; flex: 0 1 auto; word-break: break-all; }
+.abscompat .abscompat-list .abscompat-meta { color: var(--color-text-maxcontrast); flex: 1 1 auto; }
+.abscompat .abscompat-list .abscompat-missing { color: var(--color-error-text, var(--color-error)); }
+.abscompat table { max-width: 800px; width: 100%; }
+.abscompat td, .abscompat th { padding: 6px 8px; text-align: start; }
+.abscompat th { color: var(--color-text-maxcontrast); font-weight: normal; }

@@ -1,0 +1,11 @@
+# Local test instance credentials (generated, never commit)
+dev/test-instance.env
+dev/books/
+abscompat/vendor/
+abscompat/build/
+node_modules/
+*.key
+*.csr
+
+# Personal planning brief (kept local)
+/Nextcloud Audiobookshelf-compatible progress plugin build brief for Claude Code.md

@@ -1,4 +1,4 @@
-# abscompat: Audiobookshelf-compatible API for Nextcloud
+# Audiobookshelf Minus (abscompat)
 
 A Nextcloud app that makes a folder of audiobooks look like a small Audiobookshelf server, so the
 official Audiobookshelf app (or Voice) can download and play the books, and CrossPoint Sync can
@@ -12,7 +12,7 @@ project.
 
 ### 1. Install and choose your audiobook folder
 
-1. In Nextcloud, go to **Apps → Multimedia**, find **Audiobookshelf Compatible** and click
+1. In Nextcloud, go to **Apps → Multimedia**, find **Audiobookshelf Minus** and click
    **Download and enable**.
 2. Put your audiobooks in a folder in your files, one folder per book:
 

@@ -2,7 +2,7 @@
 <info xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
       xsi:noNamespaceSchemaLocation="https://apps.nextcloud.com/schema/apps/info.xsd">
     <id>abscompat</id>
-    <name>Audiobookshelf Compatible</name>
+    <name>Audiobookshelf Minus</name>
     <summary>Serve your audiobooks to Audiobookshelf apps and sync listening progress</summary>
     <description><![CDATA[Turn a folder of audiobooks in your Nextcloud into a small **Audiobookshelf-compatible server**.
 

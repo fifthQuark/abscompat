@@ -1,4 +1,4 @@
-/* Audiobookshelf Compatible: admin settings (plain JS, no build step). */
+/* Audiobookshelf Minus: admin settings (plain JS, no build step). */
 (function () {
 	'use strict'
 

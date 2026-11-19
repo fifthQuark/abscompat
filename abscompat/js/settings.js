@@ -1,4 +1,4 @@
-/* Audiobookshelf Compatible: personal settings (plain JS, no build step). */
+/* Audiobookshelf Minus: personal settings (plain JS, no build step). */
 (function () {
 	'use strict'
 

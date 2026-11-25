@@ -13,6 +13,12 @@ name: Release
 on:
   push:
     tags: ['v*']
+  # Submits a release that is on GitHub but not in the App Store, without building it again.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag of the existing release, like v1.0.0
+        required: true
 
 permissions:
   contents: read
@@ -24,6 +30,7 @@ concurrency:
 jobs:
   build:
     name: Build (no secrets)
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.check.outputs.version }}
@@ -89,21 +96,19 @@ jobs:
       - name: App Store
         env:
           APPSTORE_TOKEN: ${{ secrets.APPSTORE_TOKEN }}
-        run: |
-          if [ -z "$APPSTORE_TOKEN" ]; then
-            echo "::warning::No APPSTORE_TOKEN: $VERSION was not submitted to the App Store (docs/RELEASING.md)."
-            exit 0
-          fi
-          url="https://github.com/$GH_REPO/releases/download/v$VERSION/abscompat-$VERSION.tar.gz"
-          curl -sSfL --retry 5 --retry-all-errors "$url" -o public.tar.gz
-          cmp public.tar.gz "signed/abscompat-$VERSION.tar.gz"
-          jq -n --arg d "$url" --rawfile s signed/signature.txt '{download: $d, signature: $s, nightly: false}' > body.json
-          # One request, never repeated: the store limits uploads.
-          code=$(printf 'header = "Authorization: Token %s"\n' "$APPSTORE_TOKEN" | curl -sS -K - -o answer.txt -w '%{http_code}' \
-            -H 'Content-Type: application/json' --data @body.json https://apps.nextcloud.com/api/v1/apps/releases)
-          echo "App Store answered $code"
-          if [ "$code" != 200 ] && [ "$code" != 201 ]; then
-            head -c 2000 answer.txt
-            echo "::error::The App Store did not accept $VERSION. The GitHub release exists; upload it by hand (docs/RELEASING.md)."
-            exit 1
-          fi
+        run: python3 -I scripts/appstore-submit.py "v$VERSION"
+
+  submit:
+    name: Submit an existing release
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: App Store
+        env:
+          TAG: ${{ inputs.tag }}
+          GH_REPO: ${{ github.repository }}
+          APPSTORE_TOKEN: ${{ secrets.APPSTORE_TOKEN }}
+        run: python3 -I scripts/appstore-submit.py "$TAG"

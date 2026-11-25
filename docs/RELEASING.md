@@ -48,9 +48,13 @@ To release: bump the version, date the changelog, push to `main`, wait for CI, t
 git tag v1.0.0 && git push origin v1.0.0
 ```
 
-If the App Store refuses a release, the GitHub release already exists and is signed: upload it by
-hand with its URL and the `signature.txt` attached to it. Don't re-run the job, and don't replace
-the files: a new build needs a new signature.
+If the App Store step fails, the GitHub release already exists and is signed. Don't re-run the job
+and don't replace the files: a new build needs a new signature. Submit the existing release instead,
+or upload it by hand with its URL and the `signature.txt` attached to it:
+
+```bash
+gh workflow run release.yml --repo fifthQuark/abscompat -f tag=v1.0.0
+```
 
 `scripts/abscompat.crt` is the public certificate. Replace it when it is renewed (valid to
 2037-02-28). `SIGN_IMAGE` in `scripts/sign-release.sh` and the actions are pinned; update them now

@@ -28,6 +28,8 @@ class LibraryService {
 	public const AUDIO_EXT = ['m4b', 'mp3', 'm4a', 'ogg', 'oga', 'opus', 'flac', 'aac', 'wav', 'wma', 'mp4'];
 	public const EBOOK_EXT = ['epub'];
 	public const COVER_NAMES = ['cover.jpg', 'cover.jpeg', 'cover.png', 'cover.webp', 'folder.jpg', 'folder.png'];
+	/** File name prefix of covers the user chose or that were looked up (others are embedded art). */
+	public const CUSTOM_COVER = 'own-';
 	/** Metadata the user can override => column */
 	private const EDITABLE = ['title' => 'title', 'author' => 'author', 'series' => 'series', 'seriesSeq' => 'series_seq', 'narrator' => 'narrator'];
 	public const DEFAULT_FOLDERS = ['/Audiobooks'];
@@ -439,6 +441,10 @@ class LibraryService {
 			];
 			if ($existing === null) {
 				$values['added_at'] = $now;
+				if (isset($ov['cover'])) {
+					// A book that left and came back keeps the cover chosen for it.
+					$values['cover_cache'] = $ov['cover'];
+				}
 				$qb = $this->db->getQueryBuilder();
 				$qb->insert('abs_items');
 				foreach ($values as $k => $v) {
@@ -501,11 +507,7 @@ class LibraryService {
 
 	private function storeEmbeddedCover(string $userId, string $key, array $picture): void {
 		try {
-			try {
-				$folder = $this->appData->getFolder('covers');
-			} catch (NotFoundException) {
-				$folder = $this->appData->newFolder('covers');
-			}
+			$folder = $this->coverFolder();
 			$ext = str_contains($picture['mime'], 'png') ? 'png' : 'jpg';
 			$name = md5($userId) . '-' . $key . '.' . $ext;
 			if ($folder->fileExists($name)) {
@@ -591,8 +593,8 @@ class LibraryService {
 		return $this->getItemRow($userId, $key);
 	}
 
-	/** @return array<string, ?string> */
-	private function getOverrides(string $userId, string $key): array {
+	/** @return array<string, mixed> edits (EDITABLE), cover (file name), coverTried (time) */
+	public function getOverrides(string $userId, string $key): array {
 		$qb = $this->db->getQueryBuilder();
 		$qb->select('data')->from('abs_overrides')
 			->where($qb->expr()->eq('user_id', $qb->createNamedParameter($userId)))
@@ -601,6 +603,69 @@ class LibraryService {
 		$data = $res->fetchOne();
 		$res->closeCursor();
 		return is_string($data) ? (json_decode($data, true) ?: []) : [];
+	}
+
+	/** Change some override values; null removes one. */
+	public function patchOverrides(string $userId, string $key, array $values): void {
+		$ov = $this->getOverrides($userId, $key);
+		foreach ($values as $k => $v) {
+			if ($v === null) {
+				unset($ov[$k]);
+			} else {
+				$ov[$k] = $v;
+			}
+		}
+		$this->saveOverrides($userId, $key, $ov);
+	}
+
+	private function coverFolder(): \OCP\Files\SimpleFS\ISimpleFolder {
+		try {
+			return $this->appData->getFolder('covers');
+		} catch (NotFoundException) {
+			return $this->appData->newFolder('covers');
+		}
+	}
+
+	/** Use this JPEG as the book's cover, or remove it again with null. Kept across rescans. */
+	public function setCustomCover(string $userId, string $key, ?string $jpeg): void {
+		$name = self::CUSTOM_COVER . md5($userId) . '-' . $key . '.jpg';
+		$folder = $this->coverFolder();
+		if ($jpeg !== null) {
+			if ($folder->fileExists($name)) {
+				$folder->getFile($name)->putContent($jpeg);
+			} else {
+				$folder->newFile($name, $jpeg);
+			}
+		} elseif ($folder->fileExists($name)) {
+			$folder->getFile($name)->delete();
+		}
+		$this->patchOverrides($userId, $key, ['cover' => $jpeg === null ? null : $name, 'coverTried' => $jpeg === null ? time() : null]);
+		$qb = $this->db->getQueryBuilder();
+		$qb->update('abs_items')
+			->set('cover_cache', $qb->createNamedParameter($jpeg === null ? null : $name, self::ptype($jpeg === null ? null : $name)))
+			->set('updated_at', $qb->createNamedParameter((int)(microtime(true) * 1000), IQueryBuilder::PARAM_INT))
+			->where($qb->expr()->eq('user_id', $qb->createNamedParameter($userId)))
+			->andWhere($qb->expr()->eq('item_key', $qb->createNamedParameter($key)));
+		$qb->executeStatement();
+	}
+
+	/** Users that have scanned books. @return list<string> */
+	public function usersWithItems(): array {
+		$qb = $this->db->getQueryBuilder();
+		$qb->selectDistinct('user_id')->from('abs_items');
+		$res = $qb->executeQuery();
+		$out = [];
+		while ($row = $res->fetch()) {
+			$out[] = (string)$row['user_id'];
+		}
+		$res->closeCursor();
+		return $out;
+	}
+
+	/** Items of the library folders that exist. @return list<array> */
+	public function visibleItemRows(string $userId): array {
+		$ids = array_column($this->getLibraries($userId), 'id');
+		return array_values(array_filter($this->getItemRows($userId), static fn ($r) => in_array((string)$r['library_id'], $ids, true)));
 	}
 
 	private function saveOverrides(string $userId, string $key, array $ov): void {
@@ -734,6 +799,7 @@ class LibraryService {
 	}
 
 	public function deleteAllForUser(string $userId): void {
+		$this->deleteCoverFiles($userId);
 		$keys = array_map(static fn ($r) => (int)$r['id'], $this->getItemRows($userId));
 		foreach (array_chunk($keys, 500) as $chunk) {
 			$qb = $this->db->getQueryBuilder();
@@ -744,6 +810,20 @@ class LibraryService {
 			$qb = $this->db->getQueryBuilder();
 			$qb->delete($table)->where($qb->expr()->eq('user_id', $qb->createNamedParameter($userId)));
 			$qb->executeStatement();
+		}
+	}
+
+	private function deleteCoverFiles(string $userId): void {
+		try {
+			foreach ($this->appData->getFolder('covers')->getDirectoryListing() as $file) {
+				if (preg_match('/^(?:' . self::CUSTOM_COVER . ')?' . md5($userId) . '-/', $file->getName())) {
+					$file->delete();
+				}
+			}
+		} catch (\Throwable $e) {
+			if (!$e instanceof NotFoundException) {
+				$this->logger->warning('Could not delete covers: ' . $e->getMessage(), ['app' => 'abscompat']);
+			}
 		}
 	}
 }

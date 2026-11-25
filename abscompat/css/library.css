@@ -82,7 +82,18 @@
 .abs-foot { position: sticky; bottom: -20px; display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px; margin: 0 -20px -20px; padding: 12px 20px; background: var(--color-main-background); border-top: 1px solid var(--color-border); }
 .abs-foot .abs-muted { margin-inline-end: auto; }
 
+.abs-book-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.abs-check { display: flex; gap: 8px; align-items: center; margin: 8px 0; cursor: pointer; }
+.abs .abs-check input { width: auto; min-height: 0; height: 18px; margin: 0; }
+.abs .abs-cover-pick { display: flex; flex-direction: column; align-items: stretch; justify-content: flex-start; width: 100%; height: auto; margin: 0; padding: 6px; border: 0; background: transparent; text-align: start; font-weight: normal; color: var(--color-main-text); border-radius: var(--border-radius-large); white-space: normal; }
+.abs .abs-cover-pick:hover, .abs .abs-cover-pick:focus-visible { background: var(--color-background-hover); }
+.abs-cover-pick .abs-cover { border-radius: var(--border-radius); overflow: hidden; }
+.abs-cover-search, .abs-cover-tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+.abs-cover-search input { flex: 1 1 200px; min-width: 0; margin: 0; }
+.abs-cover-one .abs-grid, .abs-cover-all .abs-grid { margin-top: 12px; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px; }
+
 @media (max-width: 600px) {
+	.abs-head h2 { flex: 1 1 100%; }
 	.abs-head .abs-search { order: 5; flex: 1 1 100%; }
 	.abs-grid { grid-template-columns: repeat(auto-fill, minmax(105px, 1fr)); gap: 16px 10px; }
 	.abs-row .abs-card { flex-basis: 120px; }

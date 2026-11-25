@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace OCA\AbsCompat\BackgroundJob;
 
+use OCA\AbsCompat\Service\CoverService;
 use OCA\AbsCompat\Service\LibraryService;
 use OCA\AbsCompat\Service\SessionService;
 use OCP\AppFramework\Utility\ITimeFactory;
@@ -22,6 +23,7 @@ class ScanJob extends TimedJob {
 		private IDBConnection $db,
 		private LibraryService $library,
 		private SessionService $sessions,
+		private CoverService $covers,
 		private LoggerInterface $logger,
 	) {
 		parent::__construct($time);
@@ -43,6 +45,18 @@ class ScanJob extends TimedJob {
 				$this->library->scanUser((string)$uid, $left);
 			} catch (\Throwable $e) {
 				$this->logger->warning('Library scan failed for ' . $uid . ': ' . $e->getMessage(), ['app' => 'abscompat', 'exception' => $e]);
+			}
+		}
+		// Covers for users who switched that on; stops when the time is up and continues next hour.
+		$deadline = microtime(true) + 120;
+		foreach ($this->library->usersWithItems() as $uid) {
+			if (microtime(true) > $deadline) {
+				break;
+			}
+			try {
+				$this->covers->autoAll($uid, $deadline);
+			} catch (\Throwable $e) {
+				$this->logger->warning('Looking up covers failed for ' . $uid . ': ' . $e->getMessage(), ['app' => 'abscompat', 'exception' => $e]);
 			}
 		}
 		// Keep playback sessions (listening stats) for a year.

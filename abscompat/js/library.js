@@ -56,7 +56,7 @@
 		return b >= 1e6 ? Math.round(b / 1e6) + ' MB' : Math.max(1, Math.round(b / 1e3)) + ' KB'
 	}
 
-	let data = { libraries: [], books: [] }
+	let data = { libraries: [], books: [], covers: { auto: false, online: false } }
 	let loaded = false
 	let view = 'home'
 	const ui = { search: '', sort: 'title', filter: 'all', library: '' }
@@ -231,6 +231,7 @@
 					},
 				}),
 				libSelect,
+				h('button.abs-covers', { type: 'button', onclick: () => Covers.openAll() }, t('Covers')),
 				h('button.abs-rescan', { type: 'button', onclick: (e) => rescan(e.currentTarget) }, t('Rescan')),
 				h('button.primary', { type: 'button', onclick: () => Upload.open() }, t('Upload'))),
 			tabs, main,
@@ -350,7 +351,9 @@
 						: st === 'progress' ? h('div.abs-book-progress', null, progressBar(b.progress.progress),
 							h('span', null, t('{pct}% listened, {left} left', { pct: Math.round(b.progress.progress * 100), left: fmtDuration(left) })))
 							: h('p.abs-muted', null, t('Not started')),
-					h('p', null, h('a.button', { href: OC.generateUrl('/f/' + b.id) }, t('Show in Files'))))),
+					h('p.abs-book-actions', null,
+						h('a.button', { href: OC.generateUrl('/f/' + b.id) }, t('Show in Files')),
+						b.coverEditable && h('button', { type: 'button', onclick: () => Covers.openBook(b) }, b.hasCover ? t('Change cover') : t('Find cover'))))),
 			b.description && h('p.abs-desc', { dir: 'auto' }, b.description),
 			b.chapters.length > 1 && h('details', null, h('summary', null, n('%n chapter', '%n chapters', b.chapters.length)),
 				h('ol.abs-list', null, b.chapters.map((c) => h('li', null, h('span', { dir: 'auto' }, c.title), h('span.abs-muted', null, fmtClock(c.start)))))),
@@ -358,6 +361,184 @@
 				h('ul.abs-list', null, b.files.map((f) => h('li', null, h('span', { dir: 'auto' }, f.name), h('span.abs-muted', null, fmtClock(f.duration) + ' · ' + fmtSize(f.size)))))),
 		]))
 	}
+
+	// ----- covers -----
+
+	const Covers = (function () {
+		/** Show a changed cover without reloading the library. */
+		function changed(id, r) {
+			const b = data.books.find((x) => x.id === id)
+			if (b) {
+				b.hasCover = r.hasCover
+				b.updatedAt = r.updatedAt
+			}
+			render()
+		}
+
+		const missing = () => data.books.filter((b) => !b.hasCover)
+		const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+		function openAll() {
+			if (!loaded) return
+			let stop = false
+			let running = false
+			const d = dialog('abs-cover-all', t('Covers'), () => { stop = true })
+			const line = h('p', { role: 'status' })
+			const bar = h('span.abs-bar-fill')
+			const barBox = h('span.abs-bar.abs-upload-bar', { hidden: true }, bar)
+			const list = h('div.abs-grid')
+			const start = h('button.primary', { type: 'button', onclick: () => (running ? (stop = true) : run()) })
+			const auto = h('input', { type: 'checkbox', checked: data.covers.auto, onchange: async () => {
+				auto.disabled = true
+				try {
+					data.covers.auto = (await api('PUT', '/web/covers/auto', { enabled: auto.checked })).auto
+					if (data.covers.auto && missing().length && !running) run()
+				} catch (e) {
+					auto.checked = data.covers.auto
+					toast(e.message, true)
+				}
+				auto.disabled = false
+			} })
+
+			function show() {
+				const n0 = missing()
+				if (!running) line.textContent = n0.length ? n('%n book has no cover.', '%n books have no cover.', n0.length) : t('Every book has a cover.')
+				start.textContent = running ? t('Stop') : t('Find missing covers')
+				start.disabled = !running && (!n0.length || !data.covers.online)
+				list.replaceChildren(...n0.map((b) => h('button.abs-cover-pick', { type: 'button', disabled: running, title: t('Choose a cover for {title}', { title: b.title }), onclick: () => openBook(b, show) },
+					cover(b), h('span.abs-card-title', { dir: 'auto' }, b.title), b.author && h('span.abs-card-sub', { dir: 'auto' }, b.author))))
+			}
+
+			async function run() {
+				running = true
+				stop = false
+				let found = 0
+				const todo = missing()
+				barBox.hidden = false
+				show()
+				let error = ''
+				for (let i = 0; i < todo.length && !stop; i++) {
+					line.textContent = t('Looking up {n} of {total}: {title}', { n: i + 1, total: todo.length, title: todo[i].title })
+					bar.style.width = (i / todo.length * 100) + '%'
+					try {
+						const r = await api('POST', '/web/items/' + todo[i].id + '/cover/auto')
+						if (r.hasCover) {
+							found++
+							changed(todo[i].id, r)
+						}
+					} catch (e) {
+						if (e.code !== 'own') {
+							error = e.message
+							break
+						}
+					}
+					// The search service allows about 20 lookups a minute.
+					if (i + 1 < todo.length && !stop) await wait(4000)
+				}
+				running = false
+				barBox.hidden = true
+				show()
+				const left = missing().length
+				line.textContent = [n('%n cover found.', '%n covers found.', found), left ? t('For the others, click a book to choose a cover yourself.') : '', error].filter(Boolean).join(' ')
+			}
+
+			d.append(...kids([closeButton(() => d.shut()), h('h3', null, t('Covers')),
+				data.covers.online ? null : h('p.abs-error', null, t('This server has no internet connection, so covers can only be uploaded.')),
+				line, barBox, h('p', null, start),
+				h('label.abs-check', null, auto, h('span', null, t('Find covers for books without one automatically'))),
+				h('p.abs-muted', null, t('Covers come from Apple\'s audiobook search. For each book without a cover, this server sends its title and author there. A cover is only used when both match. Covers are made square and stored in Nextcloud; your files are not changed.')),
+				list]))
+			show()
+			d.showModal()
+		}
+
+		function openBook(b, after) {
+			const d = dialog('abs-cover-one', t('Choose cover'), () => after && after())
+			const q = h('input', { type: 'search', value: [b.title, b.authors && b.authors[0]].filter(Boolean).join(' '), maxlength: '200', dir: 'auto', 'aria-label': t('Search covers') })
+			const status = h('p.abs-muted', { role: 'status' })
+			const results = h('div.abs-grid')
+			const busy = (on) => {
+				for (const x of d.querySelectorAll('button:not(.abs-close), input')) x.disabled = on
+			}
+
+			async function use(fn) {
+				busy(true)
+				status.textContent = t('Saving…')
+				try {
+					const r = await fn()
+					changed(b.id, r)
+					d.shut()
+					if (bookDialog) showBook(b.id)
+				} catch (e) {
+					status.textContent = e.message
+					busy(false)
+				}
+			}
+
+			async function search() {
+				busy(true)
+				status.textContent = t('Searching…')
+				results.replaceChildren()
+				try {
+					const r = await api('POST', '/web/covers/search', { q: q.value })
+					status.textContent = r.results.length ? t('Click the right cover.') : t('Nothing found. Try other words, for example only the title.')
+					results.replaceChildren(...r.results.map((c) => {
+						const label = [c.title, c.author, c.year].filter(Boolean).join(', ')
+						return h('button.abs-cover-pick', { type: 'button', title: label, 'aria-label': label, onclick: () => use(() => api('POST', '/web/items/' + b.id + '/cover', { url: c.url, sig: c.sig })) },
+							h('span.abs-cover', null, h('img', { src: url('/web/covers/preview') + '?url=' + encodeURIComponent(c.thumb) + '&sig=' + c.thumbSig, alt: '', loading: 'lazy' })),
+							h('span.abs-card-title', { dir: 'auto' }, c.title), h('span.abs-card-sub', { dir: 'auto' }, [c.author, c.year].filter(Boolean).join(' · ')))
+					}))
+				} catch (e) {
+					status.textContent = e.message
+				}
+				busy(false)
+			}
+
+			async function upload(file) {
+				const form = new FormData()
+				form.append('image', file)
+				const res = await fetch(url('/web/items/' + b.id + '/cover/upload'), { method: 'POST', headers: { requesttoken: OC.requestToken }, body: form })
+				const r = await res.json().catch(() => ({}))
+				if (!res.ok) throw new Error(r.error || r.message || t('The server did not answer ({status})', { status: res.status }))
+				return r
+			}
+
+			d.append(...kids([closeButton(() => d.shut()), h('h3', { dir: 'auto' }, b.title),
+				data.covers.online && h('form.abs-cover-search', { onsubmit: (e) => {
+					e.preventDefault()
+					search()
+				} }, q, h('button.primary', { type: 'submit' }, t('Search'))),
+				data.covers.online && h('p.abs-muted', null, t('The words above are sent to Apple\'s audiobook search.')),
+				h('div.abs-cover-tools', null,
+					h('button', { type: 'button', onclick: () => {
+						const input = h('input', { type: 'file', accept: '.jpg,.jpeg,.png,.webp' })
+						input.addEventListener('change', () => input.files[0] && use(() => upload(input.files[0])))
+						input.click()
+					} }, t('Upload an image')),
+					b.hasCover && h('button', { type: 'button', onclick: () => use(() => api('DELETE', '/web/items/' + b.id + '/cover')) }, t('Remove cover')),
+					h('span.abs-muted', null, t('Images are made square.'))),
+				status, results]))
+			d.showModal()
+		}
+
+		/** After an upload, when automatic covers are on. */
+		async function afterUpload(ids) {
+			if (!data.covers.auto || !data.covers.online) return
+			for (const id of ids) {
+				const b = data.books.find((x) => x.id === id)
+				if (!b || b.hasCover) continue
+				try {
+					const r = await api('POST', '/web/items/' + id + '/cover/auto')
+					if (r.hasCover) changed(id, r)
+				} catch (e) {
+					return
+				}
+				await wait(4000)
+			}
+		}
+
+		return { openAll, openBook, afterUpload }
+	})()
 
 	// ----- upload -----
 
@@ -656,13 +837,14 @@
 			const signal = controller.signal
 			update()
 			let added = 0
+			const ids = []
 			for (const x of queue) {
 				if (signal.aborted) break
 				x.state = 'uploading'
 				x.message = t('Starting…')
 				update()
 				try {
-					await uploadOne(x, signal)
+					ids.push((await uploadOne(x, signal)).id)
 					x.state = 'done'
 					added++
 				} catch (e) {
@@ -691,6 +873,7 @@
 				toast(n('%n book added', '%n books added', added))
 				await load().catch((e) => toast(e.message, true))
 				if (d && drafts.every((x) => x.state === 'done')) d.shut()
+				Covers.afterUpload(ids)
 			}
 		}
 
@@ -723,7 +906,7 @@
 			}
 			x.message = t('Adding to your library…')
 			update()
-			await api('POST', '/web/upload/finish', { libraryPath: x.plan.library, folder: x.plan.folder, metadata: metaOf(x) })
+			return api('POST', '/web/upload/finish', { libraryPath: x.plan.library, folder: x.plan.folder, metadata: metaOf(x) })
 		}
 
 		return { open, add, busy: () => controller !== null }

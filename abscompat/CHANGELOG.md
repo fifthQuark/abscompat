@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.0 – unreleased
+
+- Find covers for books without one: search and choose, look up all missing ones, or let it
+  happen automatically (off by default; sends title and author to Apple's audiobook search).
+- Upload your own cover image for a book. Covers added in the app are always made square.
+
 ## 0.6.0 – 2026-11-25
 
 - New library page in the top menu: continue listening, all books, authors and series, with

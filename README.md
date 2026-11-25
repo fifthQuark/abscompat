@@ -40,6 +40,17 @@ folders on it, check the title, author, series and cover it filled in, and click
 creates the folders above for you. Each folder becomes one book (`CD1`, `CD2`, … are joined);
 books you drop as single m4b files become one book each.
 
+#### Covers
+
+Books without a cover can get one under **Covers** on the Audiobooks page, or with **Find cover**
+on a book. **Find missing covers** looks all of them up; a cover is only used when title and author
+both match. Tick the box there to have it done automatically, once an hour and after uploads.
+
+Lookups go from your Nextcloud server to Apple's public iTunes search and contain the title and
+author, nothing else. They are off until you use them. Covers added this way are made square
+(slightly off ones are cropped, portrait ones get filled sides) and are stored in Nextcloud, not in
+your folders. A cover in the book's folder or audio files always wins.
+
 ### 2. Audiobookshelf app
 
 Tested against the Android app's code. The iOS app uses the same server calls but hasn't been
@@ -76,8 +87,8 @@ sign out a single device, delete a key, or sign out all devices at once.
 - Books are served as whole files (with resume). There is no transcoding or HLS streaming.
 - Podcasts, collections, playlists, author photos and online metadata matching are not
   supported.
-- The library page does not play audio. Details and covers can be set when uploading, not changed
-  there afterwards.
+- The library page does not play audio. Details can be set when uploading, not changed there
+  afterwards. Covers can be added to books that have none in their files.
 - Details entered when uploading, and edits from apps (title, authors, series), are stored in
   Nextcloud. The audio files are never changed.
 

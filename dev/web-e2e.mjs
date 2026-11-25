@@ -30,11 +30,12 @@ async function check(name, fn) {
   try { await fn(); passes++; console.log('  ok  ', name) } catch (e) { fails++; console.log('  FAIL', name, '\n       ', e.message.split('\n').slice(0, 6).join(' ')) }
 }
 async function cleanup() {
-  for (const p of [LIB, OTHER]) {
+  for (const p of [LIB, OTHER, '/WebAway']) {
     const r = await fetch(dav(p), { method: 'DELETE', headers: auth })
     assert.ok([204, 404].includes(r.status), String(r.status))
   }
   await call('DELETE', '/settings/folders')
+  await call('PUT', '/web/covers/auto', { enabled: false })
 }
 
 await cleanup()
@@ -57,7 +58,9 @@ try {
   })
   await check('missing library folder is listed as writable; a dry run creates nothing', async () => {
     const r = await call('GET', '/web/library')
-    assert.deepEqual(r.json, { libraries: [{ id: null, path: LIB, name: 'WebLib', writable: true }], books: [] })
+    assert.deepEqual(r.json.libraries, [{ id: null, path: LIB, name: 'WebLib', writable: true }])
+    assert.deepEqual(r.json.books, [])
+    assert.equal(r.json.covers.auto, false, 'automatic covers are off by default')
     const p = await plan({ title: 'T', author: 'A' }, audio('x.mp3'))
     assert.deepEqual(p.json, { folder: LIB + '/A/T', files: ['x.mp3'] })
     assert.equal(await exists(LIB), false)
@@ -147,6 +150,65 @@ try {
     assert.ok(await exists(LIB + '/Ann Lee/Saga'))
     assert.equal((await call('POST', '/web/upload/cancel', { libraryPath: LIB, folder: LIB + '/Ann Lee/Saga/3 - My - Title' })).json.removed, 0)
     assert.ok(await exists(LIB + '/Ann Lee/Saga/3 - My - Title/b.mp3'))
+  })
+  // No test contacts the search service.
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAEAAAABgCAIAAAAip+O/AAAAZ0lEQVR42u3PQQkAAAgEsItjCPtjLP82EAYrsEzXaxEQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQuBbvUCGlVIqooAAAAABJRU5ErkJggg==', 'base64')
+  const uploadCover = async (id, body, headers = auth) => {
+    const form = new FormData()
+    form.append('image', new Blob([body]), 'x.png')
+    const r = await fetch(`${base}/web/items/${id}/cover/upload`, { method: 'POST', headers: { ...headers, 'OCS-APIRequest': 'true' }, body: form })
+    return { status: r.status, json: await r.json().catch(() => null) }
+  }
+  const coverSize = async (id) => {
+    const b = Buffer.from(await (await fetch(`${base}/web/items/${id}/cover`, { headers: auth })).arrayBuffer())
+    if (b[0] !== 0xff || b[1] !== 0xd8) return null
+    for (let o = 2; o < b.length;) {
+      if (b[o + 1] >= 0xc0 && b[o + 1] <= 0xc2) return [b.readUInt16BE(o + 7), b.readUInt16BE(o + 5)]
+      o += 2 + b.readUInt16BE(o + 2)
+    }
+  }
+  await check('own cover for a book without one: made square, kept, removable', async () => {
+    const b = (await call('GET', '/web/library')).json.books.find((x) => x.title === 'Discs')
+    assert.deepEqual([b.hasCover, b.coverEditable], [false, true])
+    const r = await uploadCover(b.id, png)
+    assert.deepEqual([r.status, r.json.hasCover], [200, true], JSON.stringify(r))
+    assert.deepEqual(await coverSize(b.id), [96, 96], 'a 64x96 image becomes square without cutting')
+    // Survives a rescan with changed files, and leaving and coming back.
+    await put(LIB + '/D/Discs/CD2 - 01.mp3', fixture('chapters.mp3'))
+    await call('POST', '/settings/rescan')
+    assert.deepEqual(await coverSize(b.id), [96, 96])
+    const move = (from, to) => fetch(dav(from), { method: 'MOVE', headers: { ...auth, destination: dav(to) } })
+    assert.equal((await move(LIB + '/D', '/WebAway')).status, 201)
+    await call('POST', '/settings/rescan')
+    assert.equal((await call('GET', '/web/items/' + b.id)).status, 404)
+    assert.equal((await move('/WebAway', LIB + '/D')).status, 201)
+    await call('POST', '/settings/rescan')
+    assert.deepEqual(await coverSize(b.id), [96, 96])
+    assert.equal((await call('DELETE', `/web/items/${b.id}/cover`)).json.hasCover, false)
+    assert.equal((await call('GET', `/web/items/${b.id}/cover`)).status, 404)
+  })
+  await check('covers in the files are never replaced; bad images and foreign addresses are refused', async () => {
+    const other = (await call('GET', '/web/library')).json.books.find((x) => x.title === 'Discs')
+    assert.equal((await uploadCover(book.id, png)).status, 409)
+    assert.equal((await call('DELETE', `/web/items/${book.id}/cover`)).status, 409)
+    assert.equal((await call('POST', `/web/items/${book.id}/cover/auto`)).status, 409)
+    for (const bad of [Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>'), Buffer.from('GIF89a'), png.subarray(0, 60)]) {
+      assert.equal((await uploadCover(other.id, bad)).status, 422)
+    }
+    for (const url of ['https://example.org/a.jpg', 'http://127.0.0.1/', 'https://is1-ssl.mzstatic.com/image/x/1200x1200bb.jpg']) {
+      const sig = '00'.repeat(64)
+      assert.equal((await call('POST', `/web/items/${other.id}/cover`, { url, sig })).status, 400, url)
+      assert.equal((await call('GET', '/web/covers/preview?url=' + encodeURIComponent(url) + '&sig=' + sig)).status, 400, url)
+    }
+    const noCsrf = await fetch(`${base}/web/items/${other.id}/cover`, { method: 'DELETE' })
+    assert.ok([401, 412].includes(noCsrf.status), String(noCsrf.status))
+    assert.equal((await call('GET', '/web/items/' + other.id)).json.hasCover, false)
+  })
+  await check('automatic covers can be switched on and off', async () => {
+    for (const enabled of [true, false]) {
+      assert.equal((await call('PUT', '/web/covers/auto', { enabled })).json.auto, enabled)
+      assert.equal((await call('GET', '/web/library')).json.covers.auto, enabled)
+    }
   })
   await check('a newly chosen folder is scanned although an older folder was scanned just now', async () => {
     const mk = await fetch(dav(OTHER), { method: 'MKCOL', headers: auth })

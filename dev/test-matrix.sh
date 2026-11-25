@@ -85,6 +85,9 @@ for v in $VERSIONS; do
   problems=$($D exec -u www-data "$name" cat /var/www/html/data/nextcloud.log 2>/dev/null \
     | grep -iE 'abscompat' | grep -E '"level":[34]|"level":2.*"app":"abscompat"' || true)
   if [ -n "$problems" ]; then echo "LOG PROBLEMS:"; echo "$problems" | cut -c1-900 | head -5; rc=1; else echo "log clean"; fi
+  # A crashed or killed web server process leaves nothing in nextcloud.log.
+  crashes=$($D logs "$name" 2>&1 | grep -E 'AH00051|AH00052|exit signal|Segmentation|PHP Fatal|server reached MaxRequestWorkers' || true)
+  if [ -n "$crashes" ]; then echo "WEB SERVER PROBLEMS:"; echo "$crashes" | cut -c1-400 | head -8; rc=1; fi
   if [ -z "${KEEP:-}" ]; then
     $D rm -f "$name" >/dev/null
     if [ "$DB" != sqlite ]; then $D rm -f -v "$name-db" >/dev/null; fi

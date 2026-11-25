@@ -7,6 +7,7 @@ namespace OCA\AbsCompat\Controller;
 use OCA\AbsCompat\AppInfo\Application;
 use OCA\AbsCompat\Http\CoverFile;
 use OCA\AbsCompat\Service\Catalog;
+use OCA\AbsCompat\Service\CoverService;
 use OCA\AbsCompat\Service\LibraryService;
 use OCA\AbsCompat\Service\MetadataExtractor;
 use OCA\AbsCompat\Service\ProgressService;
@@ -31,6 +32,7 @@ class WebController extends Controller {
 		private Catalog $catalog,
 		private ProgressService $progress,
 		private UploadService $uploads,
+		private CoverService $covers,
 	) {
 		parent::__construct(Application::APP_ID, $request);
 	}
@@ -64,6 +66,8 @@ class WebController extends Controller {
 			'addedAt' => (int)$r['added_at'],
 			'updatedAt' => (int)$r['updated_at'],
 			'hasCover' => Serializer::hasCover($r),
+			// Covers in the book's files can't be changed here.
+			'coverEditable' => !CoverService::hasOwnCover($r),
 			'hasEbook' => $r['ebook_file_id'] !== null,
 			'progress' => $p === null ? null : [
 				'progress' => (float)$p['progress'],
@@ -101,6 +105,7 @@ class WebController extends Controller {
 		}
 		$progress = $this->progress->allForUser($uid);
 		return new JSONResponse([
+			'covers' => ['auto' => $this->covers->isAuto($uid), 'online' => $this->covers->online()],
 			'libraries' => $libraries,
 			'books' => array_map(static fn ($r) => self::book($r, $progress), $this->catalog->visibleRows($uid)),
 		]);

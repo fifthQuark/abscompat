@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.8.0 – unreleased
+## 0.8.0 – 2026-11-26
 
 - Streaming in the Audiobookshelf app, off until you turn it on in the settings. Read the warning
   there: it costs bandwidth for every listen, keeps the server busy, and some hosting providers

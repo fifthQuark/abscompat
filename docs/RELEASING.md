@@ -21,6 +21,40 @@ One-time setup:
 
 4. The repository is https://github.com/fifthQuark/abscompat (set in `abscompat/appinfo/info.xml`).
 
+## Automatic releases
+
+`.github/workflows/release.yml` releases from `main`. After CI passed on a push, it starts when the
+version in `appinfo/info.xml` has no tag yet **and** its `CHANGELOG.md` entry has a date
+(`## X.Y.Z – YYYY-MM-DD`; "unreleased" means not ready). It builds without secrets, then waits for
+approval (Actions → the run → Review deployments), signs, creates the GitHub release and submits
+it to the App Store.
+
+Setup, once. The `release` environment allows only `main` and needs a reviewer. Add its secrets
+yourself:
+
+```bash
+gh secret set APP_SIGNING_KEY --env release --repo fifthQuark/abscompat < ~/.nextcloud/certificates/abscompat.key
+```
+
+```bash
+gh secret set APPSTORE_TOKEN --env release --repo fifthQuark/abscompat
+```
+
+The second asks for the token, which is under My account → API token on
+[apps.nextcloud.com](https://apps.nextcloud.com).
+
+To release: bump the version, date the changelog, push to `main`, approve.
+
+If the App Store refuses a release, the GitHub release already exists and is signed: upload it by
+hand with its URL and the `signature.txt` attached to it. Don't re-run the job, and don't replace
+the files: a new build needs a new signature.
+
+`scripts/abscompat.crt` is the public certificate. Replace it when it is renewed (valid to
+2037-02-28). `SIGN_IMAGE` in `scripts/sign-release.sh` and the actions are pinned; update them now
+and then.
+
+## Manual release
+
 Each release:
 
 1. Bump `<version>` in `abscompat/appinfo/info.xml` and add a `CHANGELOG.md` entry. Check that

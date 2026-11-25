@@ -92,7 +92,7 @@ sign out a single device, delete a key, or sign out all devices at once.
 | `abscompat/tests/` | PHPUnit unit tests (no Nextcloud server needed) and audio fixtures |
 | `dev/` | Local test instance, test-book generator, end-to-end suites, version matrix |
 | `docs/` | [Client research](docs/milestone-1-research.md), [release steps](docs/RELEASING.md) |
-| `scripts/` | Certificate request and signed release build |
+| `scripts/` | Certificate request, release check and signing (used by the release workflow) |
 
 Unit tests (with PHP and Composer available, or inside the test container):
 

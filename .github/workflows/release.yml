@@ -1,0 +1,112 @@
+# Releases a new version after CI passed on main: signed package, GitHub release, App Store.
+# It starts when main has a version without a tag and a dated CHANGELOG entry, and waits for
+# approval in the "release" environment, which holds the secrets (see docs/RELEASING.md).
+name: Release
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: New version?
+    # Only pushes to this repository: a fork's branch may also be called main.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.check.outputs.release }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - id: check
+        run: scripts/release-check.sh | tee -a "$GITHUB_OUTPUT"
+
+  build:
+    name: Build (no secrets)
+    needs: check
+    if: needs.check.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
+        with:
+          php-version: '8.3'
+          tools: composer
+          coverage: none
+      - run: abscompat/build-release.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: unsigned
+          path: abscompat/build/abscompat-${{ needs.check.outputs.version }}.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: Sign and publish ${{ needs.check.outputs.version }}
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      SHA: ${{ github.event.workflow_run.head_sha }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: unsigned
+          path: unsigned
+      - name: Sign
+        env:
+          APP_SIGNING_KEY: ${{ secrets.APP_SIGNING_KEY }}
+        run: |
+          umask 077
+          trap 'rm -f "$RUNNER_TEMP/abscompat.key"' EXIT
+          printf '%s\n' "$APP_SIGNING_KEY" > "$RUNNER_TEMP/abscompat.key"
+          scripts/sign-release.sh "unsigned/abscompat-$VERSION.tar.gz" "$RUNNER_TEMP/abscompat.key" signed
+      - name: GitHub release
+        run: |
+          awk -v v="## $VERSION " 'index($0, v) == 1 {f=1; next} /^## /{f=0} f' abscompat/CHANGELOG.md | sed '/./,$!d' > notes.md
+          gh release create "v$VERSION" "signed/abscompat-$VERSION.tar.gz" signed/signature.txt \
+            --target "$SHA" --title "Audiobookshelf Minus $VERSION" --notes-file notes.md
+      - name: App Store
+        env:
+          APPSTORE_TOKEN: ${{ secrets.APPSTORE_TOKEN }}
+        run: |
+          url="https://github.com/$GH_REPO/releases/download/v$VERSION/abscompat-$VERSION.tar.gz"
+          curl -sSfL --retry 5 --retry-all-errors "$url" -o public.tar.gz
+          cmp public.tar.gz "signed/abscompat-$VERSION.tar.gz"
+          jq -n --arg d "$url" --rawfile s signed/signature.txt '{download: $d, signature: $s, nightly: false}' > body.json
+          # One request, never repeated: the store limits uploads.
+          code=$(printf 'header = "Authorization: Token %s"\n' "$APPSTORE_TOKEN" | curl -sS -K - -o answer.txt -w '%{http_code}' \
+            -H 'Content-Type: application/json' --data @body.json https://apps.nextcloud.com/api/v1/apps/releases)
+          echo "App Store answered $code"
+          if [ "$code" != 200 ] && [ "$code" != 201 ]; then
+            head -c 2000 answer.txt
+            echo "::error::The App Store did not accept $VERSION. The GitHub release exists; upload it by hand (docs/RELEASING.md)."
+            exit 1
+          fi

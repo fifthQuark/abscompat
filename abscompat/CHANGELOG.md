@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.6.0 – unreleased
+## 0.6.0 – 2026-11-25
 
 - New library page in the top menu: continue listening, all books, authors and series, with
   covers, progress, search and sorting.

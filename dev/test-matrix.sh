@@ -54,6 +54,14 @@ for v in $VERSIONS; do
   $D cp "$TARBALL" "$name:/tmp/app.tar.gz"
   $D exec "$name" bash -c 'tar -xzf /tmp/app.tar.gz -C /var/www/html/custom_apps && chown -R www-data: /var/www/html/custom_apps/abscompat'
   $D exec -u www-data "$name" php occ app:enable abscompat
+  # occ can't clear the web server's app-config cache (APCu), so it answers 404 for a few seconds.
+  up=; started=$SECONDS
+  for i in $(seq 1 30); do
+    if curl -sf "http://localhost:$port/apps/abscompat/ping" >/dev/null; then up=1; break; fi
+    sleep 1
+  done
+  [ -n "$up" ] || { echo "abscompat never answered after being enabled" >&2; exit 1; }
+  echo "app answered after $((SECONDS - started))s"
   $D exec -e OC_PASS="$T" -u www-data "$name" php occ user:add --password-from-env tfauser >/dev/null
   $D exec -e OC_PASS="$P" -u www-data "$name" php occ user:add --password-from-env plainuser >/dev/null
   $D exec -u www-data "$name" php -r 'define("OC_CONSOLE", 1); require "/var/www/html/lib/base.php"; \OCP\Server::get(\OCP\IDBConnection::class)->insertIfNotExist("*PREFIX*twofactor_providers", ["provider_id" => "totp", "uid" => "tfauser", "enabled" => 1], ["provider_id", "uid"]);'

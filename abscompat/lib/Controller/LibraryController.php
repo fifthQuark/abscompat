@@ -47,7 +47,9 @@ class LibraryController extends AbsBaseController {
 		if ($uid === null) {
 			return $this->unauthorized();
 		}
-		$this->refreshLibrary($uid);
+		// No stale rescan here: CrossPoint Sync lists libraries before every match and search, and must
+		// stay fast. Apps go on to the items or the home shelves, which do refresh.
+		$this->ensureScanned($uid);
 		$withStats = str_contains((string)$this->request->getParam('include'), 'stats');
 		$out = [];
 		foreach ($this->library->getLibraries($uid) as $i => $lib) {

@@ -40,7 +40,7 @@ jobs:
           xmllint --noout --schema /tmp/info.xsd appinfo/info.xml
 
   integration:
-    name: Nextcloud ${{ matrix.nextcloud }}
+    name: Nextcloud ${{ matrix.nextcloud }}, ${{ matrix.db }}
     runs-on: ubuntu-latest
     needs: unit
     strategy:
@@ -48,6 +48,8 @@ jobs:
       matrix:
         # Keep in line with <nextcloud min-version/max-version> in appinfo/info.xml.
         nextcloud: ['33', '34', '35']
+        # mysql = MariaDB. SQLite alone hides text-encoding errors the other two reject.
+        db: [sqlite, mysql, pgsql]
     steps:
       - uses: actions/checkout@v4
       - uses: shivammathur/setup-php@v2
@@ -69,10 +71,11 @@ jobs:
       - name: Install in Nextcloud and run e2e suites
         env:
           DOCKER: docker
+          DB: ${{ matrix.db }}
           CROSSPOINT_DIR: /tmp/crosspoint-sync
         run: dev/test-matrix.sh abscompat/build/abscompat-*.tar.gz ${{ matrix.nextcloud }}
       - uses: actions/upload-artifact@v4
-        if: matrix.nextcloud == '34'
+        if: matrix.nextcloud == '34' && matrix.db == 'sqlite'
         with:
           name: abscompat-tarball
           path: abscompat/build/abscompat-*.tar.gz

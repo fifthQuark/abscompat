@@ -55,7 +55,7 @@ class MetadataExtractor {
 		$tag = static function (string ...$keys) use ($comments): ?string {
 			foreach ($keys as $k) {
 				if (!empty($comments[$k]) && is_array($comments[$k])) {
-					$v = trim((string)reset($comments[$k]));
+					$v = self::cleanText((string)reset($comments[$k]));
 					if ($v !== '') {
 						return $v;
 					}
@@ -95,6 +95,15 @@ class MetadataExtractor {
 		];
 	}
 
+	/**
+	 * Tags come from arbitrary files: replace invalid UTF-8 and drop control characters (notably NUL).
+	 * MariaDB and PostgreSQL refuse to store such text, which would lose the whole book.
+	 */
+	public static function cleanText(string $s): string {
+		$s = mb_scrub($s, 'UTF-8');
+		return trim((string)preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]+/u', '', $s));
+	}
+
 	/** @return list<array{start: float, end: ?float, title: string}> */
 	public static function chapters(array $info, float $duration): array {
 		$out = [];
@@ -129,6 +138,7 @@ class MetadataExtractor {
 			if ($out[$i]['end'] === null || $out[$i]['end'] <= $out[$i]['start'] || $out[$i]['end'] > $next + 0.5) {
 				$out[$i]['end'] = $next;
 			}
+			$out[$i]['title'] = self::cleanText($out[$i]['title']);
 			if ($out[$i]['title'] === '') {
 				$out[$i]['title'] = 'Chapter ' . ($i + 1);
 			}

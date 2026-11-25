@@ -112,6 +112,10 @@ node dev/settings-e2e.mjs
 ```
 
 ```bash
+node dev/scan-e2e.mjs
+```
+
+```bash
 CROSSPOINT_DIR=/path/to/crosspoint-sync /path/to/crosspoint-sync/node_modules/.bin/tsx dev/crosspoint-e2e.mts
 ```
 
@@ -130,7 +134,13 @@ UNSIGNED=1 scripts/release.sh
 ```
 
 ```bash
-CROSSPOINT_DIR=/path/to/crosspoint-sync dev/test-matrix.sh abscompat/build/abscompat-0.5.0.tar.gz
+CROSSPOINT_DIR=/path/to/crosspoint-sync dev/test-matrix.sh abscompat/build/abscompat-0.5.1.tar.gz
+```
+
+The same against MariaDB (`DB=mysql`) or PostgreSQL (`DB=pgsql`):
+
+```bash
+DB=mysql dev/test-matrix.sh abscompat/build/abscompat-0.5.1.tar.gz 34
 ```
 
 ### Phone checklist (manual)

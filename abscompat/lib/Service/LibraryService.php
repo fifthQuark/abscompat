@@ -158,10 +158,11 @@ class LibraryService {
 					// Keep what we have; the next run continues. Don't remove anything.
 					return $stats;
 				}
+				// Present on disk, so never "missing", even when reading it fails below.
+				$seen[(string)$book['node']->getId()] = true;
 				try {
 					$key = $this->scanBook($userId, $lib, $book['node'], $book['audio'], $book['dir']);
 					if ($key !== null) {
-						$seen[$key] = true;
 						$stats['items']++;
 					}
 				} catch (\Throwable $e) {
@@ -169,7 +170,7 @@ class LibraryService {
 				}
 			}
 		}
-		$stats['removed'] = $this->removeMissing($userId, $seen);
+		$stats['removed'] = $this->removeMissing($userId, $seen, $libIds);
 		return $stats;
 	}
 
@@ -341,7 +342,7 @@ class LibraryService {
 		$series = $first['series'] ?? $folderSeries;
 		$seriesSeq = $first['seriesPart'] ?? $seriesSeq;
 		// Edits made from a client (PATCH /api/items/:id/media) win over file metadata.
-		$ov = json_decode((string)($existing['overrides'] ?? ''), true) ?: [];
+		$ov = $this->getOverrides($userId, $key);
 		foreach (['title' => 'title', 'author' => 'author', 'series' => 'series', 'seriesSeq' => 'series_seq'] as $k => $_) {
 			if (array_key_exists($k, $ov)) {
 				$$k = $ov[$k];
@@ -392,7 +393,7 @@ class LibraryService {
 				'genres' => json_encode(isset($first['genre']) ? array_values(array_filter(array_map('trim', preg_split('/[;\/]/', $first['genre'])))) : []),
 				'duration' => $duration,
 				'size' => $size,
-				'chapters' => json_encode($chapters),
+				'chapters' => json_encode($chapters, JSON_INVALID_UTF8_SUBSTITUTE),
 				'cover_file_id' => $coverFileId,
 				'ebook_file_id' => $ebookFileId,
 				'updated_at' => $now,
@@ -484,10 +485,21 @@ class LibraryService {
 		}
 	}
 
-	/** @param array<string|int, true> $seen item keys found by this scan (numeric keys become ints) */
-	private function removeMissing(string $userId, array $seen): int {
+	/**
+	 * Drop items that are gone from the libraries this scan walked. Items of a library folder that
+	 * was not found (renamed, unmounted) stay: they are hidden until the folder is back.
+	 *
+	 * @param array<string|int, true> $seen item keys found by this scan (numeric keys become ints)
+	 * @param list<string> $libIds libraries that were walked completely
+	 */
+	private function removeMissing(string $userId, array $seen, array $libIds): int {
+		if ($libIds === []) {
+			return 0;
+		}
 		$qb = $this->db->getQueryBuilder();
-		$qb->select('id', 'item_key')->from('abs_items')->where($qb->expr()->eq('user_id', $qb->createNamedParameter($userId)));
+		$qb->select('id', 'item_key')->from('abs_items')
+			->where($qb->expr()->eq('user_id', $qb->createNamedParameter($userId)))
+			->andWhere($qb->expr()->in('library_id', $qb->createNamedParameter($libIds, IQueryBuilder::PARAM_STR_ARRAY)));
 		$res = $qb->executeQuery();
 		$gone = [];
 		while ($row = $res->fetch()) {
@@ -504,25 +516,26 @@ class LibraryService {
 			$qb->delete('abs_items')->where($qb->expr()->in('id', $qb->createNamedParameter($chunk, IQueryBuilder::PARAM_INT_ARRAY)));
 			$qb->executeStatement();
 		}
-		// Progress rows are kept on purpose: a book moved out and back keeps its position.
+		// Progress, bookmarks and metadata edits are kept on purpose: a book moved out and back keeps them.
 		return count($gone);
 	}
 
 	/**
 	 * Store metadata edits (title, author, series, seriesSeq) as overrides and apply them now.
-	 * Keys with null value remove that override. The audio files are not changed.
+	 * A null value clears that field. The audio files are not changed.
 	 */
 	public function updateMetadata(string $userId, string $key, array $changes): ?array {
 		$row = $this->getItemRow($userId, $key);
 		if ($row === null) {
 			return null;
 		}
-		$ov = json_decode((string)($row['overrides'] ?? ''), true) ?: [];
+		$ov = $this->getOverrides($userId, $key);
 		foreach (['title', 'author', 'series', 'seriesSeq'] as $k) {
 			if (array_key_exists($k, $changes)) {
 				$ov[$k] = $changes[$k];
 			}
 		}
+		$this->saveOverrides($userId, $key, $ov);
 		$cols = ['title' => 'title', 'author' => 'author', 'series' => 'series', 'seriesSeq' => 'series_seq'];
 		$qb = $this->db->getQueryBuilder();
 		$qb->update('abs_items');
@@ -535,11 +548,37 @@ class LibraryService {
 				$qb->set($col, $qb->createNamedParameter($v, $v === null ? IQueryBuilder::PARAM_NULL : IQueryBuilder::PARAM_STR));
 			}
 		}
-		$qb->set('overrides', $qb->createNamedParameter(json_encode($ov)))
-			->set('updated_at', $qb->createNamedParameter((int)(microtime(true) * 1000), IQueryBuilder::PARAM_INT))
+		$qb->set('updated_at', $qb->createNamedParameter((int)(microtime(true) * 1000), IQueryBuilder::PARAM_INT))
 			->where($qb->expr()->eq('id', $qb->createNamedParameter((int)$row['id'], IQueryBuilder::PARAM_INT)));
 		$qb->executeStatement();
 		return $this->getItemRow($userId, $key);
+	}
+
+	/** @return array<string, ?string> */
+	private function getOverrides(string $userId, string $key): array {
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('data')->from('abs_overrides')
+			->where($qb->expr()->eq('user_id', $qb->createNamedParameter($userId)))
+			->andWhere($qb->expr()->eq('item_key', $qb->createNamedParameter($key)));
+		$res = $qb->executeQuery();
+		$data = $res->fetchOne();
+		$res->closeCursor();
+		return is_string($data) ? (json_decode($data, true) ?: []) : [];
+	}
+
+	private function saveOverrides(string $userId, string $key, array $ov): void {
+		$qb = $this->db->getQueryBuilder();
+		$qb->delete('abs_overrides')
+			->where($qb->expr()->eq('user_id', $qb->createNamedParameter($userId)))
+			->andWhere($qb->expr()->eq('item_key', $qb->createNamedParameter($key)));
+		$qb->executeStatement();
+		$qb = $this->db->getQueryBuilder();
+		$qb->insert('abs_overrides')->values([
+			'user_id' => $qb->createNamedParameter($userId),
+			'item_key' => $qb->createNamedParameter($key),
+			'data' => $qb->createNamedParameter(json_encode($ov)),
+		]);
+		$qb->executeStatement();
 	}
 
 	/**
@@ -656,7 +695,7 @@ class LibraryService {
 			$qb->delete('abs_tracks')->where($qb->expr()->in('item_id', $qb->createNamedParameter($chunk, IQueryBuilder::PARAM_INT_ARRAY)));
 			$qb->executeStatement();
 		}
-		foreach (['abs_items', 'abs_progress', 'abs_sessions'] as $table) {
+		foreach (['abs_items', 'abs_overrides', 'abs_progress', 'abs_sessions'] as $table) {
 			$qb = $this->db->getQueryBuilder();
 			$qb->delete($table)->where($qb->expr()->eq('user_id', $qb->createNamedParameter($userId)));
 			$qb->executeStatement();

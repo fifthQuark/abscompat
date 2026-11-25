@@ -59,6 +59,30 @@ class MetadataExtractorTest extends TestCase {
 		$this->assertSame(0.0, $m['duration']);
 	}
 
+	public function testMalformedTextIsCleaned(): void {
+		$this->assertSame('ספר 🎧', MetadataExtractor::cleanText(" ספר 🎧\0 "));
+		$this->assertSame("a\nb", MetadataExtractor::cleanText("a\nb"));
+		$this->assertSame('onetwo', MetadataExtractor::cleanText("one\0two"));
+		$bad = MetadataExtractor::cleanText("broken \xff\xfe\xc3( text");
+		$this->assertTrue(mb_check_encoding($bad, 'UTF-8'));
+		$this->assertStringStartsWith('broken ', $bad);
+
+		$c = MetadataExtractor::chapters(['id3v2' => ['chapters' => [
+			['time_begin' => 0, 'time_end' => 3000, 'chapter_name' => "Ch \xff x"],
+			['time_begin' => 3000, 'time_end' => 6000, 'chapter_name' => "\0"],
+		]]], 6.0);
+		$this->assertNotFalse(json_encode($c));
+		$this->assertSame('Chapter 2', $c[1]['title']);
+	}
+
+	public function testMalformedTagsInAFile(): void {
+		$m = (new MetadataExtractor(new NullLogger()))->extract($this->file('malformed.mp3'), false);
+		$this->assertNotFalse(json_encode($m['tags']), 'tags must be valid UTF-8');
+		$this->assertStringStartsWith('broken', $m['tags']['description']);
+		$this->assertStringNotContainsString("\0", implode('', $m['tags']));
+		$this->assertCount(2, $m['chapters']);
+	}
+
 	public function testChapterNormalisation(): void {
 		// Missing ends are filled from the next start, empty titles numbered, zero-length dropped.
 		$info = ['id3v2' => ['chapters' => [

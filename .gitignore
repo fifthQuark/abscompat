@@ -9,3 +9,6 @@ node_modules/
 
 # Personal planning brief (kept local)
 /Nextcloud Audiobookshelf-compatible progress plugin build brief for Claude Code.md
+
+# Local clone of the certificate-request fork
+/app-certificate-requests/

@@ -1,13 +1,18 @@
-# Releases a new version after CI passed on main: signed package, GitHub release, App Store.
-# It starts when main has a version without a tag and a dated CHANGELOG entry, and waits for
-# approval in the "release" environment, which holds the secrets (see docs/RELEASING.md).
+# Builds, signs and publishes a release whenever a tag like v1.0.0 is pushed: signed package, GitHub
+# release, App Store. Creating a release with a new tag on the GitHub website works too.
+#
+# Required repository secrets (Settings > Secrets and variables > Actions):
+#   APP_PRIVATE_KEY   content of abscompat.key
+#   APPSTORE_TOKEN    API token from https://apps.nextcloud.com/account/token; without it the App
+#                     Store step is skipped
+# The certificate is public: scripts/abscompat.crt.
+#
+# The tag must match <version> in appinfo/info.xml, be on main, and have a dated CHANGELOG entry.
 name: Release
 
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
-    branches: [main]
+  push:
+    tags: ['v*']
 
 permissions:
   contents: read
@@ -17,36 +22,20 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  check:
-    name: New version?
-    # Only pushes to this repository: a fork's branch may also be called main.
-    if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push' &&
-      github.event.workflow_run.head_repository.full_name == github.repository
+  build:
+    name: Build (no secrets)
     runs-on: ubuntu-latest
     outputs:
-      release: ${{ steps.check.outputs.release }}
       version: ${{ steps.check.outputs.version }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
           persist-credentials: false
       - id: check
-        run: scripts/release-check.sh | tee -a "$GITHUB_OUTPUT"
-
-  build:
-    name: Build (no secrets)
-    needs: check
-    if: needs.check.outputs.release == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          ref: ${{ github.event.workflow_run.head_sha }}
-          persist-credentials: false
+        run: |
+          git fetch -q origin main:refs/remotes/origin/main
+          scripts/release-check.sh "$GITHUB_REF_NAME" | tee -a "$GITHUB_OUTPUT"
       - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
           php-version: '8.3'
@@ -56,25 +45,22 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: unsigned
-          path: abscompat/build/abscompat-${{ needs.check.outputs.version }}.tar.gz
+          path: abscompat/build/abscompat-${{ steps.check.outputs.version }}.tar.gz
           if-no-files-found: error
 
   publish:
-    name: Sign and publish ${{ needs.check.outputs.version }}
-    needs: [check, build]
+    name: Sign and publish
+    needs: build
     runs-on: ubuntu-latest
-    environment: release
     permissions:
       contents: write
     env:
-      VERSION: ${{ needs.check.outputs.version }}
-      SHA: ${{ github.event.workflow_run.head_sha }}
+      VERSION: ${{ needs.build.outputs.version }}
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -82,21 +68,32 @@ jobs:
           path: unsigned
       - name: Sign
         env:
-          APP_SIGNING_KEY: ${{ secrets.APP_SIGNING_KEY }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
         run: |
+          [ -n "$APP_PRIVATE_KEY" ] || { echo "::error::The secret APP_PRIVATE_KEY is missing (docs/RELEASING.md)"; exit 1; }
           umask 077
           trap 'rm -f "$RUNNER_TEMP/abscompat.key"' EXIT
-          printf '%s\n' "$APP_SIGNING_KEY" > "$RUNNER_TEMP/abscompat.key"
+          printf '%s\n' "$APP_PRIVATE_KEY" > "$RUNNER_TEMP/abscompat.key"
           scripts/sign-release.sh "unsigned/abscompat-$VERSION.tar.gz" "$RUNNER_TEMP/abscompat.key" signed
       - name: GitHub release
         run: |
-          awk -v v="## $VERSION " 'index($0, v) == 1 {f=1; next} /^## /{f=0} f' abscompat/CHANGELOG.md | sed '/./,$!d' > notes.md
-          gh release create "v$VERSION" "signed/abscompat-$VERSION.tar.gz" signed/signature.txt \
-            --target "$SHA" --title "Audiobookshelf Minus $VERSION" --notes-file notes.md
+          # A release made on the website exists already. Files are never replaced: the upload
+          # fails when they are there, because the App Store may know their signature.
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            gh release upload "v$VERSION" "signed/abscompat-$VERSION.tar.gz" signed/signature.txt
+          else
+            awk -v v="## $VERSION " 'index($0, v) == 1 {f=1; next} /^## /{f=0} f' abscompat/CHANGELOG.md | sed '/./,$!d' > notes.md
+            gh release create "v$VERSION" "signed/abscompat-$VERSION.tar.gz" signed/signature.txt \
+              --verify-tag --title "Audiobookshelf Minus $VERSION" --notes-file notes.md
+          fi
       - name: App Store
         env:
           APPSTORE_TOKEN: ${{ secrets.APPSTORE_TOKEN }}
         run: |
+          if [ -z "$APPSTORE_TOKEN" ]; then
+            echo "::warning::No APPSTORE_TOKEN: $VERSION was not submitted to the App Store (docs/RELEASING.md)."
+            exit 0
+          fi
           url="https://github.com/$GH_REPO/releases/download/v$VERSION/abscompat-$VERSION.tar.gz"
           curl -sSfL --retry 5 --retry-all-errors "$url" -o public.tar.gz
           cmp public.tar.gz "signed/abscompat-$VERSION.tar.gz"

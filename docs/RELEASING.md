@@ -23,27 +23,30 @@ One-time setup:
 
 ## Automatic releases
 
-`.github/workflows/release.yml` releases from `main`. After CI passed on a push, it starts when the
-version in `appinfo/info.xml` has no tag yet **and** its `CHANGELOG.md` entry has a date
-(`## X.Y.Z – YYYY-MM-DD`; "unreleased" means not ready). It builds without secrets, then waits for
-approval (Actions → the run → Review deployments), signs, creates the GitHub release and submits
-it to the App Store.
+`.github/workflows/release.yml` releases whenever a tag like `v1.0.0` is pushed (or a release with a
+new tag is created on the GitHub website). It builds without secrets, signs, creates the GitHub
+release and submits it to the App Store. It refuses a tag that does not match `<version>` in
+`appinfo/info.xml`, is not on `main`, or whose `CHANGELOG.md` entry has no date. It does not wait for
+CI or for approval: check that CI is green before tagging.
 
-Setup, once. The `release` environment allows only `main` and needs a reviewer. Add its secrets
-yourself:
+Setup, once. Add the repository secrets yourself:
 
 ```bash
-gh secret set APP_SIGNING_KEY --env release --repo fifthQuark/abscompat < ~/.nextcloud/certificates/abscompat.key
+gh secret set APP_PRIVATE_KEY --repo fifthQuark/abscompat < ~/.nextcloud/certificates/abscompat.key
 ```
 
 ```bash
-gh secret set APPSTORE_TOKEN --env release --repo fifthQuark/abscompat
+gh secret set APPSTORE_TOKEN --repo fifthQuark/abscompat
 ```
 
 The second asks for the token, which is under My account → API token on
-[apps.nextcloud.com](https://apps.nextcloud.com).
+[apps.nextcloud.com](https://apps.nextcloud.com). Without it the App Store step is skipped.
 
-To release: bump the version, date the changelog, push to `main`, approve.
+To release: bump the version, date the changelog, push to `main`, wait for CI, then push the tag:
+
+```bash
+git tag v1.0.0 && git push origin v1.0.0
+```
 
 If the App Store refuses a release, the GitHub release already exists and is signed: upload it by
 hand with its URL and the `signature.txt` attached to it. Don't re-run the job, and don't replace

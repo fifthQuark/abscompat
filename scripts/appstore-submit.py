@@ -38,6 +38,8 @@ token = os.environ.get('APPSTORE_TOKEN', '').strip()
 if not token:
     print(f'::warning::No APPSTORE_TOKEN: {tag} was not submitted to the App Store (docs/RELEASING.md).')
     sys.exit(0)
+if not re.fullmatch(r'[A-Za-z0-9]+', token):  # never print any of it: the log is public
+    fail('APPSTORE_TOKEN is not just a token: it has spaces, line breaks or other characters in it. Set the secret again (docs/RELEASING.md). Nothing was submitted.')
 
 base = f'{GITHUB}/{os.environ["GH_REPO"]}/releases/download/{tag}'
 url = f'{base}/abscompat-{tag[1:]}.tar.gz'

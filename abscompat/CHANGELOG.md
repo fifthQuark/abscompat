@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.1 – 2026-11-25
+
+- Fixed: the library could stop working with "Internal Server Error" until the web server was
+  restarted, or treat the default folders as chosen by the user. It affected people who use the
+  default folders, now and then, on Nextcloud 33 to 35 with PHP's JIT compiler switched on.
+
 ## 0.7.0 – 2026-11-25
 
 - Find covers for books without one: search and choose, look up all missing ones, or let it

@@ -37,7 +37,7 @@ class CoverService {
 	}
 
 	public function isAuto(string $userId): bool {
-		return $this->userConfig->getValueBool($userId, Application::APP_ID, 'auto_covers', false);
+		return UserValue::bool($this->userConfig, $userId, 'auto_covers');
 	}
 
 	public function setAuto(string $userId, bool $on): void {

@@ -54,7 +54,7 @@ class LibraryService {
 
 	/** @return list<string> */
 	public function getFolderPaths(string $userId): array {
-		$raw = $this->userConfig->getValueString($userId, Application::APP_ID, 'folders', '');
+		$raw = UserValue::string($this->userConfig, $userId, 'folders');
 		$list = $raw === '' ? null : json_decode($raw, true);
 		if (!is_array($list)) {
 			return $this->getDefaultFolderPaths();
@@ -64,7 +64,7 @@ class LibraryService {
 
 	/** Whether the user picked folders, or uses the instance default. */
 	public function usesDefaultFolders(string $userId): bool {
-		return $this->userConfig->getValueString($userId, Application::APP_ID, 'folders', '') === '';
+		return UserValue::string($this->userConfig, $userId, 'folders') === '';
 	}
 
 	public function resetFolderPaths(string $userId): void {
@@ -108,7 +108,7 @@ class LibraryService {
 	}
 
 	public function getLastScan(string $userId): int {
-		return $this->userConfig->getValueInt($userId, Application::APP_ID, 'last_scan', 0, true);
+		return UserValue::lazyInt($this->userConfig, $userId, 'last_scan');
 	}
 
 	public function markScanned(string $userId): void {
@@ -688,7 +688,7 @@ class LibraryService {
 	 * without waiting for the hourly job. Bounded by $timeLimit seconds.
 	 */
 	public function rescanIfStale(string $userId, int $maxAge = 600, float $timeLimit = 8.0): void {
-		$last = $this->userConfig->getValueInt($userId, Application::APP_ID, 'last_scan', 0, true);
+		$last = UserValue::lazyInt($this->userConfig, $userId, 'last_scan');
 		if (time() - $last < $maxAge) {
 			return;
 		}

@@ -76,6 +76,7 @@ for v in $VERSIONS; do
   echo "- api";      ENV_FILE=$envf node dev/e2e.mjs | quiet || rc=1
   echo "- settings"; ENV_FILE=$envf node dev/settings-e2e.mjs | quiet || rc=1
   echo "- scanner";  ENV_FILE=$envf NC_CONTAINER=$name DOCKER=$D node dev/scan-e2e.mjs | quiet || rc=1
+  echo "- web";      ENV_FILE=$envf node dev/web-e2e.mjs | quiet || rc=1
   if [ -n "${CROSSPOINT_DIR:-}" ]; then
     echo "- crosspoint"
     ENV_FILE=$envf CROSSPOINT_DIR=$CROSSPOINT_DIR "$CROSSPOINT_DIR/node_modules/.bin/tsx" dev/crosspoint-e2e.mts | quiet || rc=1

@@ -28,6 +28,8 @@ class LibraryService {
 	public const AUDIO_EXT = ['m4b', 'mp3', 'm4a', 'ogg', 'oga', 'opus', 'flac', 'aac', 'wav', 'wma', 'mp4'];
 	public const EBOOK_EXT = ['epub'];
 	public const COVER_NAMES = ['cover.jpg', 'cover.jpeg', 'cover.png', 'cover.webp', 'folder.jpg', 'folder.png'];
+	/** Metadata the user can override => column */
+	private const EDITABLE = ['title' => 'title', 'author' => 'author', 'series' => 'series', 'seriesSeq' => 'series_seq', 'narrator' => 'narrator'];
 	public const DEFAULT_FOLDERS = ['/Audiobooks'];
 	private const MIME = [
 		'm4b' => 'audio/mp4', 'm4a' => 'audio/mp4', 'mp4' => 'audio/mp4', 'aac' => 'audio/aac',
@@ -175,6 +177,33 @@ class LibraryService {
 	}
 
 	/**
+	 * Scan one book folder right away (after an upload), without walking the whole library.
+	 * Returns the item key, or null when the folder holds no audio.
+	 */
+	public function scanBookFolder(string $userId, string $libraryPath, string $folder): ?string {
+		foreach ($this->getLibraries($userId) as $lib) {
+			if ($lib['path'] !== $libraryPath) {
+				continue;
+			}
+			try {
+				$node = $this->rootFolder->getUserFolder($userId)->get($folder);
+			} catch (NotFoundException) {
+				return null;
+			}
+			$books = [];
+			if ($node instanceof Folder) {
+				$this->findBooks($node, 1, $books);
+			}
+			foreach ($books as $book) {
+				if ($book['node']->getId() === $node->getId()) {
+					return $this->scanBook($userId, $lib, $node, $book['audio'], $book['dir']);
+				}
+			}
+		}
+		return null;
+	}
+
+	/**
 	 * Book = folder that directly holds audio files (its audio files in sub-folders, e.g. CD1/CD2,
 	 * belong to it), or an audio file in the library root.
 	 *
@@ -277,7 +306,15 @@ class LibraryService {
 		}
 
 		// Track order: disc/track tags when every file has them, else natural filename order.
-		$allNumbered = array_reduce($tracks, static fn ($ok, $t) => $ok && isset($t['meta']['tags']['track']), true);
+		// Repeated numbers (several discs without disc tags) don't give an order either.
+		$numbers = [];
+		foreach ($tracks as $t) {
+			$tags = $t['meta']['tags'] ?? [];
+			if (isset($tags['track'])) {
+				$numbers[(int)($tags['disc'] ?? 0) . '-' . (int)$tags['track']] = true;
+			}
+		}
+		$allNumbered = count($numbers) === count($tracks);
 		usort($tracks, static function ($a, $b) use ($allNumbered) {
 			if ($allNumbered) {
 				$da = (int)($a['meta']['tags']['disc'] ?? 0);
@@ -341,9 +378,10 @@ class LibraryService {
 		$author = $first['albumArtist'] ?? $first['artist'] ?? $folderAuthor;
 		$series = $first['series'] ?? $folderSeries;
 		$seriesSeq = $first['seriesPart'] ?? $seriesSeq;
-		// Edits made from a client (PATCH /api/items/:id/media) win over file metadata.
+		$narrator = $first['composer'] ?? null;
+		// Edits made from a client (PATCH /api/items/:id/media) or the upload form win over file metadata.
 		$ov = $this->getOverrides($userId, $key);
-		foreach (['title' => 'title', 'author' => 'author', 'series' => 'series', 'seriesSeq' => 'series_seq'] as $k => $_) {
+		foreach (array_keys(self::EDITABLE) as $k) {
 			if (array_key_exists($k, $ov)) {
 				$$k = $ov[$k];
 			}
@@ -385,7 +423,7 @@ class LibraryService {
 				'title' => mb_substr((string)$title, 0, 512),
 				'subtitle' => isset($first['subtitle']) ? mb_substr($first['subtitle'], 0, 512) : null,
 				'author' => $author !== null ? mb_substr($author, 0, 512) : null,
-				'narrator' => isset($first['composer']) ? mb_substr($first['composer'], 0, 512) : null,
+				'narrator' => $narrator !== null ? mb_substr($narrator, 0, 512) : null,
 				'series' => $series !== null ? mb_substr($series, 0, 512) : null,
 				'series_seq' => $seriesSeq !== null ? mb_substr($seriesSeq, 0, 32) : null,
 				'published_year' => isset($first['year']) ? mb_substr(preg_replace('/^(\d{4}).*/', '$1', $first['year']), 0, 16) : null,
@@ -521,7 +559,7 @@ class LibraryService {
 	}
 
 	/**
-	 * Store metadata edits (title, author, series, seriesSeq) as overrides and apply them now.
+	 * Store metadata edits (the keys of EDITABLE) as overrides and apply them now.
 	 * A null value clears that field. The audio files are not changed.
 	 */
 	public function updateMetadata(string $userId, string $key, array $changes): ?array {
@@ -530,16 +568,15 @@ class LibraryService {
 			return null;
 		}
 		$ov = $this->getOverrides($userId, $key);
-		foreach (['title', 'author', 'series', 'seriesSeq'] as $k) {
+		foreach (array_keys(self::EDITABLE) as $k) {
 			if (array_key_exists($k, $changes)) {
 				$ov[$k] = $changes[$k];
 			}
 		}
 		$this->saveOverrides($userId, $key, $ov);
-		$cols = ['title' => 'title', 'author' => 'author', 'series' => 'series', 'seriesSeq' => 'series_seq'];
 		$qb = $this->db->getQueryBuilder();
 		$qb->update('abs_items');
-		foreach ($cols as $k => $col) {
+		foreach (self::EDITABLE as $k => $col) {
 			if (array_key_exists($k, $changes)) {
 				$v = $changes[$k] === null ? null : mb_substr((string)$changes[$k], 0, $col === 'series_seq' ? 32 : 512);
 				if ($k === 'title' && ($v === null || $v === '')) {
@@ -600,9 +637,17 @@ class LibraryService {
 
 	// ----- queries -----
 
+	/** Whether the current library folders have scanned books; rows of removed folders don't count. */
 	public function hasItems(string $userId): bool {
+		$libIds = array_column($this->getLibraries($userId), 'id');
+		if ($libIds === []) {
+			return false;
+		}
 		$qb = $this->db->getQueryBuilder();
-		$qb->select('id')->from('abs_items')->where($qb->expr()->eq('user_id', $qb->createNamedParameter($userId)))->setMaxResults(1);
+		$qb->select('id')->from('abs_items')
+			->where($qb->expr()->eq('user_id', $qb->createNamedParameter($userId)))
+			->andWhere($qb->expr()->in('library_id', $qb->createNamedParameter($libIds, IQueryBuilder::PARAM_STR_ARRAY)))
+			->setMaxResults(1);
 		return $qb->executeQuery()->fetchOne() !== false;
 	}
 

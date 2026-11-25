@@ -35,6 +35,11 @@ project.
 3. Open **Settings → Audiobookshelf**. The default folder is `/Audiobooks` (an admin can change
    the default). To use a different one, click **Add folder**, then **Rescan**.
 
+Or skip step 2 and upload from the **Audiobooks** page in Nextcloud's top menu: drop files or
+folders on it, check the title, author, series and cover it filled in, and click **Upload**. It
+creates the folders above for you. Each folder becomes one book (`CD1`, `CD2`, … are joined);
+books you drop as single m4b files become one book each.
+
 ### 2. Audiobookshelf app
 
 Tested against the Android app's code. The iOS app uses the same server calls but hasn't been
@@ -71,15 +76,18 @@ sign out a single device, delete a key, or sign out all devices at once.
 - Books are served as whole files (with resume). There is no transcoding or HLS streaming.
 - Podcasts, collections, playlists, author photos and online metadata matching are not
   supported.
-- Metadata edits from apps (title, authors, series) are stored in Nextcloud. The audio files are
-  never changed.
+- The library page does not play audio. Details and covers can be set when uploading, not changed
+  there afterwards.
+- Details entered when uploading, and edits from apps (title, authors, series), are stored in
+  Nextcloud. The audio files are never changed.
 
 ## Development
 
 | Path | What |
 | --- | --- |
 | `abscompat/` | The Nextcloud app |
-| `abscompat/lib/Controller/` | ABS API (`Auth`, `Me`, `Library`, `Item`, `Session`) and settings |
+| `abscompat/lib/Controller/` | ABS API (`Auth`, `Me`, `Library`, `Item`, `Session`), settings, library page (`Page`, `Web`) |
+| `abscompat/js/` | Library page, upload and tag reader, settings (plain JS, no build step) |
 | `abscompat/lib/Service/` | Tokens, scanner (getID3), progress rules, sessions, ABS JSON shapes |
 | `abscompat/tests/` | PHPUnit unit tests (no Nextcloud server needed) and audio fixtures |
 | `dev/` | Local test instance, test-book generator, end-to-end suites, version matrix |
@@ -90,6 +98,12 @@ Unit tests (with PHP and Composer available, or inside the test container):
 
 ```bash
 cd abscompat && composer install && vendor/bin/phpunit -c tests/phpunit.xml
+```
+
+Tag reader tests:
+
+```bash
+node --test abscompat/tests/js/*.test.mjs
 ```
 
 Local test instance (needs podman, ffmpeg and Node 22+). `dev/test-instance.env` holds its
@@ -113,6 +127,10 @@ node dev/settings-e2e.mjs
 
 ```bash
 node dev/scan-e2e.mjs
+```
+
+```bash
+node dev/web-e2e.mjs
 ```
 
 ```bash

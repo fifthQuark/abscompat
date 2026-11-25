@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.0 – unreleased
+
+- New library page in the top menu: continue listening, all books, authors and series, with
+  covers, progress, search and sorting.
+- Upload audiobooks on that page. Title, author, series, narrator and cover are filled in from
+  the files or folder names, can be edited, and decide the folders the book is stored in.
+  Large files are uploaded in chunks.
+- Books split over several discs without disc numbers now play in file order.
+- A newly chosen library folder is scanned right away even if another folder was scanned before.
+
 ## 0.5.1 – 2026-11-25
 
 First release.

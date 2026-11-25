@@ -33,11 +33,17 @@ jobs:
         run: find lib tests -name '*.php' -print0 | xargs -0 -n1 php -l > /dev/null
       - name: PHPUnit
         run: vendor/bin/phpunit -c tests/phpunit.xml
+      - name: Tag reader tests
+        run: node --test tests/js/*.test.mjs
       - name: Validate appinfo/info.xml
         run: |
-          sudo apt-get -qq install -y libxml2-utils > /dev/null
-          curl -sSfL https://apps.nextcloud.com/schema/apps/info.xsd -o /tmp/info.xsd
-          xmllint --noout --schema /tmp/info.xsd appinfo/info.xml
+          sudo apt-get -qq install -y libxml2-utils xsltproc > /dev/null
+          # From the App Store's source, to leave the store's own server alone.
+          base=https://raw.githubusercontent.com/nextcloud/appstore/master/nextcloudappstore/api/v1/release
+          curl -sSfL $base/info.xsd -o /tmp/info.xsd
+          curl -sSfL $base/pre-info.xslt -o /tmp/pre-info.xslt
+          xsltproc /tmp/pre-info.xslt appinfo/info.xml > /tmp/info.xml
+          xmllint --noout --schema /tmp/info.xsd /tmp/info.xml
 
   integration:
     name: Nextcloud ${{ matrix.nextcloud }}, ${{ matrix.db }}

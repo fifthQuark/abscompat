@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace OCA\AbsCompat\Controller;
 
+use OCA\AbsCompat\Http\CoverFile;
 use OCA\AbsCompat\Http\RangeFileResponse;
 use OCA\AbsCompat\Service\Catalog;
 use OCA\AbsCompat\Service\LibraryService;
@@ -118,23 +119,7 @@ class ItemController extends AbsBaseController {
 		if ($row === null) {
 			return $this->notFound();
 		}
-		if ($row['cover_file_id'] !== null) {
-			$file = $this->library->getItemFile($uid, $row, (int)$row['cover_file_id']);
-			if ($file !== null) {
-				$res = new RangeFileResponse(fn () => $file->fopen('rb'), (int)$file->getSize(), $file->getMimetype(), null, null, $this->isHead(), (int)$file->getMTime());
-				$res->cacheFor(86400, false, true);
-				return $res;
-			}
-		}
-		if ($row['cover_cache'] !== null) {
-			$f = $this->library->getCachedCover((string)$row['cover_cache']);
-			if ($f !== null) {
-				$res = new RangeFileResponse(fn () => $f->read(), (int)$f->getSize(), $f->getMimeType(), null, null, $this->isHead(), (int)$f->getMTime());
-				$res->cacheFor(86400, false, true);
-				return $res;
-			}
-		}
-		return $this->notFound('Cover not found');
+		return CoverFile::response($this->library, $uid, $row, $this->isHead()) ?? $this->notFound('Cover not found');
 	}
 
 	private function isHead(): bool {

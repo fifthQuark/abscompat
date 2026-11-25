@@ -9,6 +9,7 @@
 - **Listen offline on your phone** with the official Audiobookshelf app (or another compatible player): browse your books, download them once, and listen without a connection.
 - **Progress syncs** between your devices when they are back online. It is stored in Nextcloud.
 - **Audiobook ↔ ebook sync** with [CrossPoint Sync](https://github.com/crosspoint-reader/crosspoint-sync): your listening position follows the matching ebook on your e-reader, and back.
+- **Library page.** See your books by author, series and progress, and upload new ones: title, author, series and cover are filled in from the files, and the right folders are created.
 - **No extra server.** Everything runs inside Nextcloud in PHP, so it works on managed hosting too.
 
 **How it works**
@@ -25,7 +26,7 @@
 
 This app is not affiliated with the Audiobookshelf project.
 ]]></description>
-    <version>0.5.1</version>
+    <version>0.6.0</version>
     <licence>agpl</licence>
     <author>abscompat contributors</author>
     <namespace>AbsCompat</namespace>
@@ -50,4 +51,10 @@ This app is not affiliated with the Audiobookshelf project.
         <personal>OCA\AbsCompat\Settings\Personal</personal>
         <personal-section>OCA\AbsCompat\Settings\PersonalSection</personal-section>
     </settings>
+    <navigations>
+        <navigation>
+            <name>Audiobooks</name>
+            <route>abscompat.page.index</route>
+        </navigation>
+    </navigations>
 </info>

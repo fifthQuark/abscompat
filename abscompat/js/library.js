@@ -56,7 +56,7 @@
 		return b >= 1e6 ? Math.round(b / 1e6) + ' MB' : Math.max(1, Math.round(b / 1e3)) + ' KB'
 	}
 
-	let data = { libraries: [], books: [], covers: { auto: false, online: false } }
+	let data = { libraries: [], books: [], lists: [], opds: false, covers: { auto: false, online: false } }
 	let loaded = false
 	let view = 'home'
 	const ui = { search: '', sort: 'title', filter: 'all', library: '' }
@@ -90,7 +90,7 @@
 		return data.books.filter((b) => {
 			if (ui.library && data.libraries.some((l) => l.id === ui.library) && b.libraryId !== ui.library) return false
 			if (!words.length) return true
-			const text = [b.title, b.subtitle, b.author, b.series, b.narrator].filter(Boolean).join(' ').toLocaleLowerCase()
+			const text = [b.title, b.subtitle, b.author, ...seriesOf(b).map((x) => x.name), b.narrator, ...b.tags, ...b.genres].filter(Boolean).join(' ').toLocaleLowerCase()
 			return words.every((w) => text.includes(w))
 		})
 	}
@@ -132,29 +132,191 @@
 				st === 'finished' && h('span.abs-badge', { title: t('Finished') }, '✓'),
 				st === 'progress' && progressBar(book.progress.progress)),
 			h('span.abs-card-title', { dir: 'auto' }, book.title),
+			book.ebookOnly && h('span.abs-card-sub', null, t('Ebook')),
 			second && h('span.abs-card-sub', { dir: 'auto' }, second),
 			!(opts && opts.inSeries) && book.series && h('span.abs-card-sub', { dir: 'auto' }, book.series + (book.seriesSeq ? ' #' + book.seriesSeq : '')),
 		)
 	}
 	const grid = (books, opts) => h('div.abs-grid', null, books.map((b) => card(b, opts)))
 	function section(title, books, opts) {
+		const done = books.filter((b) => status(b) === 'finished').length
 		return h('section.abs-section', null,
-			h('h3', null, h('span', { dir: 'auto' }, title), h('span.abs-count', null, n('%n book', '%n books', books.length))),
+			h('h3', null, h('span', { dir: 'auto' }, title),
+				h('span.abs-count', null, n('%n book', '%n books', books.length) + (opts && opts.inSeries && done ? ', ' + t('{n} finished', { n: done }) : '')),
+				opts && opts.inSeries && h('button.abs-series-edit', { type: 'button', 'aria-label': t('Edit series {name}', { name: title }), onclick: () => Series.open(title) }, t('Edit'))),
 			opts && opts.row ? h('div.abs-row', null, books.map((b) => card(b))) : grid(books, opts))
 	}
 
+	// ----- series -----
+
+	const seriesKey = (name) => String(name || '').trim().toLocaleLowerCase()
+	const seriesOf = (b) => [...(b.series ? [{ name: b.series, seq: b.seriesSeq }] : []), ...(b.moreSeries || [])]
+	const seriesNames = () => [...new Map(data.books.flatMap(seriesOf).map((x) => [seriesKey(x.name), x.name])).values()].sort(natural)
+	/** The books as members of each of their series: copies whose series and number are those of that series. */
+	const perSeries = (books) => books.flatMap((b) => seriesOf(b).map((x) => ({ ...b, series: x.name, seriesSeq: x.seq })))
+
+	/** The next book of each series with a finished book and none in progress, as in the apps. */
+	function nextInSeries(books) {
+		const groups = new Map()
+		for (const b of perSeries(books)) {
+			const key = b.libraryId + '/' + seriesKey(b.series)
+			groups.set(key, [...(groups.get(key) || []), b])
+		}
+		const out = []
+		for (const g of groups.values()) {
+			const next = g.sort(inSeries).find((b) => status(b) !== 'finished')
+			if (!next || !g.some((b) => status(b) === 'finished') || g.some((b) => status(b) !== 'finished' && b.progress && b.progress.currentTime > 0)) continue
+			out.push([Math.max(...g.map((b) => (b.progress ? b.progress.lastUpdate : 0))), next])
+		}
+		const ids = new Set()
+		return out.sort((a, b) => b[0] - a[0]).map((x) => x[1]).filter((b) => !ids.has(b.id) && ids.add(b.id))
+	}
+
+	const Series = (function () {
+		async function save(books) {
+			const r = await api('PUT', '/web/series', { books })
+			for (const x of r.books) {
+				const b = data.books.find((y) => y.id === x.id)
+				if (b) Object.assign(b, x)
+			}
+			render()
+		}
+		const nameInput = (value) => h('input', { type: 'text', value: value || '', maxlength: '500', dir: 'auto', list: 'abs-series-names' })
+		const seqInput = (value, label) => h('input.abs-series-no', { type: 'text', value: value || '', maxlength: '20', inputmode: 'decimal', 'aria-label': label })
+		const names = () => h('datalist', { id: 'abs-series-names' }, seriesNames().map((x) => h('option', { value: x })))
+
+		/** The next free number, when the series has numbers. */
+		function nextNumber(books) {
+			const nums = books.map((b) => parseFloat(b.seriesSeq)).filter((x) => !isNaN(x))
+			return nums.length ? String(Math.floor(Math.max(...nums)) + 1) : books.length ? '' : '1'
+		}
+
+		/** A whole series: its name, numbers and books. Without a name, a new one. */
+		function open(current) {
+			if (!loaded) return
+			const d = dialog('abs-series-all', t('Series'), () => {})
+			d.dataset.backdrop = 'off'
+			const name = nameInput(current)
+			const status = h('p.abs-muted', { role: 'status' })
+			const list = h('ul.abs-series-list')
+			const find = h('input', { type: 'search', placeholder: t('Search title or author'), 'aria-label': t('Add books'), dir: 'auto' })
+			const found = h('ul.abs-series-list')
+			const saveButton = h('button.primary', { type: 'submit' }, t('Save'))
+			// What is in the dialog; nothing is stored before Save.
+			const isIn = (b) => seriesOf(b).some((x) => seriesKey(x.name) === seriesKey(current))
+			const rows = perSeries(data.books).filter((b) => current && seriesKey(b.series) === seriesKey(current)).sort(inSeries)
+				.map((b) => ({ book: data.books.find((x) => x.id === b.id), seq: b.seriesSeq || '' }))
+			const removed = []
+			const note = h('textarea', { rows: 3, maxlength: '20000', dir: 'auto' })
+			let oldNote = ''
+			if (current) {
+				api('GET', '/web/series/description?name=' + encodeURIComponent(current)).then((r) => { note.value = oldNote = r.description }).catch(() => { /* stays empty */ })
+			}
+			/** The book's series after saving: this one set, moved or taken out, the others as they are. */
+			const after = (b, name, seq) => {
+				const list = seriesOf(b).map((x) => (current && seriesKey(x.name) === seriesKey(current) ? (name ? { name, seq } : null) : x)).filter(Boolean)
+				if (name && !(current && isIn(b))) list.push({ name, seq })
+				const unique = [...new Map(list.map((x) => [seriesKey(x.name), x])).values()]
+				return { id: b.id, series: unique.length ? unique[0].name : '', seriesSeq: unique.length ? unique[0].seq || '' : '', moreSeries: unique.slice(1) }
+			}
+
+			function show() {
+				list.replaceChildren(...rows.map((r) => {
+					const seq = seqInput(r.seq, t('Number of {title}', { title: r.book.title }))
+					seq.addEventListener('input', () => { r.seq = seq.value })
+					return h('li', null, seq, h('span.abs-series-title', { dir: 'auto' }, r.book.title),
+						h('button', { type: 'button', 'aria-label': t('Remove {title}', { title: r.book.title }), onclick: () => {
+							rows.splice(rows.indexOf(r), 1)
+							if (current && isIn(r.book)) removed.push(r.book)
+							show()
+							search()
+						} }, t('Remove')))
+				}))
+				if (!rows.length) list.replaceChildren(h('li.abs-muted', null, t('No books here.')))
+				saveButton.disabled = !rows.length && !removed.length
+			}
+
+			function search() {
+				const words = find.value.toLocaleLowerCase().split(/\s+/).filter(Boolean)
+				// Without words: books without a series by the authors already in this one, or just without a series.
+				const authors = new Set(rows.flatMap((r) => r.book.authors))
+				const hits = data.books.filter((b) => {
+					if (rows.some((r) => r.book === b)) return false
+					if (!words.length) return (!b.series || removed.includes(b)) && (!authors.size || b.authors.some((a) => authors.has(a)))
+					const text = [b.title, b.author, ...seriesOf(b).map((x) => x.name)].filter(Boolean).join(' ').toLocaleLowerCase()
+					return words.every((w) => text.includes(w))
+				}).sort((x, y) => natural(x.author || '￿', y.author || '￿') || byTitle(x, y))
+				found.replaceChildren(...hits.slice(0, 30).map((b) => h('li', null,
+					h('span.abs-series-title', { dir: 'auto' }, b.title, h('span.abs-muted', null, [b.author, b.series && !removed.includes(b) && t('also in {series}', { series: b.series })].filter(Boolean).join(' · '))),
+					h('button', { type: 'button', 'aria-label': t('Add {title}', { title: b.title }), onclick: () => {
+						const own = removed.indexOf(b)
+						if (own >= 0) removed.splice(own, 1)
+						rows.push({ book: b, seq: own >= 0 && b.seriesSeq ? b.seriesSeq : nextNumber(rows.map((r) => ({ seriesSeq: r.seq }))) })
+						show()
+						search()
+					} }, t('Add')))))
+				if (!hits.length && words.length) found.replaceChildren(h('li.abs-muted', null, t('Nothing matches your search.')))
+				if (hits.length > 30) found.append(h('li.abs-muted', null, t('Search to see more books.')))
+			}
+			find.addEventListener('input', search)
+			find.addEventListener('keydown', (e) => {
+				if (e.key === 'Enter') e.preventDefault()
+			})
+
+			d.append(closeButton(() => d.shut()), h('h3', null, current ? t('Edit series') : t('New series')),
+				h('form', { onsubmit: async (e) => {
+					e.preventDefault()
+					const series = name.value.trim()
+					if (rows.length && !series) {
+						status.className = 'abs-error'
+						status.textContent = t('Enter the name of the series.')
+						return name.focus()
+					}
+					saveButton.disabled = true
+					status.className = 'abs-muted'
+					status.textContent = t('Saving…')
+					const books = [...rows.map((r) => after(r.book, series, r.seq)), ...removed.map((b) => after(b, '', ''))]
+					try {
+						if (series && (note.value !== oldNote || (current && series !== current))) await api('PUT', '/web/series/description', { name: series, description: note.value })
+						if (current && oldNote && seriesKey(series) !== seriesKey(current)) await api('PUT', '/web/series/description', { name: current, description: '' })
+						for (let i = 0; i < books.length; i += 200) await save(books.slice(i, i + 200))
+						d.shut()
+					} catch (err) {
+						status.className = 'abs-error'
+						status.textContent = err.message
+						saveButton.disabled = false
+					}
+				} },
+				h('label.abs-field', null, h('span', null, t('Series')), name), names(),
+				h('label.abs-field', null, h('span', null, t('Description')), note),
+				h('h4', null, t('Books')), list,
+				h('h4', null, t('Add books')), find, found,
+				h('div.abs-foot', null, status, h('p.abs-muted', null, t('Stored in Nextcloud; your files are not changed.')), saveButton)))
+			show()
+			search()
+			d.showModal()
+			if (!current) name.focus()
+		}
+
+		return { open, names }
+	})()
+
 	// ----- views -----
 
-	const VIEWS = { home: t('Home'), books: t('All books'), authors: t('Authors'), series: t('Series') }
+	const VIEWS = { home: t('Home'), books: t('All books'), authors: t('Authors'), series: t('Series'), narrators: t('Narrators'), lists: t('Lists'), stats: t('Statistics') }
 
 	function renderHome(books) {
 		const out = []
 		const cont = books.filter((b) => status(b) === 'progress' && !b.progress.hidden).sort(SORTS.listened[1]).slice(0, 20)
 		if (cont.length) out.push(section(t('Continue listening'), cont, { row: true }))
+		const next = nextInSeries(books).slice(0, 20)
+		if (next.length) out.push(section(t('Continue series'), next, { row: true }))
 		const added = [...books].sort(SORTS.added[1]).slice(0, 20)
 		out.push(section(t('Recently added'), added, { row: true }))
-		const unread = books.filter((b) => status(b) === 'new').sort(byTitle)
-		if (unread.length) out.push(section(t('Not started'), unread))
+		const started = new Set(data.books.filter((b) => status(b) !== 'new').flatMap((b) => seriesOf(b).map((x) => seriesKey(x.name))))
+		const first = new Set([...new Map(perSeries(books).sort(inSeries).reverse().map((b) => [seriesKey(b.series), b])).values()].filter((b) => !started.has(seriesKey(b.series))).map((b) => b.id))
+		const unread = books.filter((b) => status(b) === 'new' && (!b.series || first.has(b.id))).sort(byTitle)
+		if (unread.length) out.push(section(t('Discover'), unread))
 		const done = books.filter((b) => status(b) === 'finished').sort(SORTS.listened[1])
 		if (done.length) out.push(section(t('Finished'), done))
 		return out
@@ -167,7 +329,9 @@
 	}
 
 	function renderBooks(books) {
-		const shown = books.filter((b) => ui.filter === 'all' || status(b) === ui.filter).sort((SORTS[ui.sort] || SORTS.title)[1])
+		const tags = [...new Set(data.books.flatMap((b) => b.tags))].sort(natural)
+		const shown = books.filter((b) => ui.filter === 'all' || (ui.filter === 'audio' ? !b.ebookOnly : ui.filter === 'ebook' ? b.hasEbook : status(b) === ui.filter))
+			.filter((b) => !tags.includes(ui.tag) || b.tags.includes(ui.tag)).sort((SORTS[ui.sort] || SORTS.title)[1])
 		const change = (k) => (v) => {
 			ui[k] = v
 			remember()
@@ -176,7 +340,11 @@
 		return [
 			h('div.abs-tools', null,
 				select(t('Sort'), Object.entries(SORTS).map(([k, v]) => [k, v[0]]), ui.sort, change('sort')),
-				select(t('Show'), [['all', t('All')], ['new', t('Not started')], ['progress', t('In progress')], ['finished', t('Finished')]], ui.filter, change('filter')),
+				select(t('Show'), [['all', t('All')], ['new', t('Not started')], ['progress', t('In progress')], ['finished', t('Finished')], ['audio', t('Audiobooks')], ['ebook', t('With ebook')]], ui.filter, change('filter')),
+				tags.length ? select(t('Tag'), [['', t('All')], ...tags.map((x) => [x, x])], tags.includes(ui.tag) ? ui.tag : '', (v) => {
+					ui.tag = v
+					render()
+				}) : null,
 				h('span.abs-count', null, n('%n book', '%n books', shown.length))),
 			shown.length ? grid(shown) : h('p.abs-none', null, t('No books here.')),
 		]
@@ -197,6 +365,15 @@
 		const out = [...groups.values()].sort((a, b) => natural(a.name, b.name)).map((g) => section(g.name, g.books.sort(sort), opts))
 		if (rest.length && none) out.push(section(none, rest.sort(byTitle)))
 		return out.length ? out : [h('p.abs-none', null, t('No books here.'))]
+	}
+
+	function renderSeries(books) {
+		const inOne = books.some((b) => b.series)
+		return [
+			h('div.abs-tools', null, h('button', { type: 'button', onclick: () => Series.open('') }, t('New series')),
+				!inOne && h('span.abs-muted', null, t('None of these books is in a series yet.'))),
+			...(inOne ? renderGroups(perSeries(books), (b) => [b.series], null, inSeries, { inSeries: true }) : []),
+		]
 	}
 
 	function empty() {
@@ -257,7 +434,10 @@
 		if (!books.length) return main.replaceChildren(h('p.abs-none', null, ui.search ? t('Nothing matches your search.') : t('No books here.')))
 		const out = view === 'books' || (view === 'home' && ui.search) ? renderBooks(books)
 			: view === 'authors' ? renderGroups(books, (b) => b.authors, t('Unknown author'), bySeries)
-				: view === 'series' ? renderGroups(books, (b) => (b.series ? [b.series] : []), null, inSeries, { inSeries: true })
+				: view === 'series' ? renderSeries(books)
+					: view === 'narrators' ? renderGroups(books.filter((b) => !b.ebookOnly), (b) => b.narrators, t('Unknown narrator'), bySeries)
+						: view === 'lists' ? Lists.render(books)
+							: view === 'stats' ? Stats.render()
 					: renderHome(books)
 		main.replaceChildren(...out)
 	}
@@ -332,6 +512,15 @@
 		const line = (label, value) => value && h('div', null, h('dt', null, label), h('dd', { dir: 'auto' }, value))
 		const left = st === 'progress' ? Math.max(0, b.duration - b.progress.currentTime) : 0
 		d.setAttribute('aria-label', b.title)
+		/** Run a change of this book and show the result. */
+		const change = async (fn) => {
+			try {
+				changedBook(await fn())
+			} catch (e) {
+				return toast(e.message, true)
+			}
+			if (bookDialog === d) showBook(id)
+		}
 		d.replaceChildren(...kids([
 			closeButton(() => d.shut()),
 			h('div.abs-book-top', null,
@@ -341,26 +530,392 @@
 					b.subtitle && h('p.abs-muted', { dir: 'auto' }, b.subtitle),
 					h('dl', null,
 						line(t('Author'), b.author),
-						line(t('Series'), b.series && b.series + (b.seriesSeq ? ' #' + b.seriesSeq : '')),
+						line(t('Series'), seriesOf(b).map((x) => x.name + (x.seq ? ' #' + x.seq : '')).join(', ')),
 						line(t('Narrator'), b.narrator),
 						line(t('Year'), b.year),
 						line(t('Genre'), b.genres.join(', ')),
-						line(t('Length'), fmtDuration(b.duration) + ' · ' + fmtSize(b.size)),
-						line(t('Ebook'), b.hasEbook && t('Included'))),
+						line(t('Tags'), b.tags.join(', ')),
+						line(t('Publisher'), b.publisher),
+						line(t('Language'), b.language),
+						line(b.ebookOnly ? t('Size') : t('Length'), (b.ebookOnly ? '' : fmtDuration(b.duration) + ' · ') + fmtSize(b.size))),
 					st === 'finished' ? h('p', null, t('Finished'))
 						: st === 'progress' ? h('div.abs-book-progress', null, progressBar(b.progress.progress),
-							h('span', null, t('{pct}% listened, {left} left', { pct: Math.round(b.progress.progress * 100), left: fmtDuration(left) })))
+							h('span', null, b.ebookOnly ? t('{pct}% read', { pct: Math.round(b.progress.progress * 100) }) : t('{pct}% listened, {left} left', { pct: Math.round(b.progress.progress * 100), left: fmtDuration(left) })))
 							: h('p.abs-muted', null, t('Not started')),
 					h('p.abs-book-actions', null,
 						h('a.button', { href: OC.generateUrl('/f/' + b.id) }, t('Show in Files')),
-						b.coverEditable && h('button', { type: 'button', onclick: () => Covers.openBook(b) }, b.hasCover ? t('Change cover') : t('Find cover'))))),
+						h('button', { type: 'button', onclick: () => editBook(b) }, t('Edit details')),
+						h('button', { type: 'button', onclick: () => Lists.choose(b) }, t('Add to list')),
+						b.coverEditable && !b.ebookOnly && h('button', { type: 'button', onclick: () => Covers.openBook(b) }, b.hasCover ? t('Change cover') : t('Find cover'))))),
 			b.description && h('p.abs-desc', { dir: 'auto' }, b.description),
 			b.chapters.length > 1 && h('details', null, h('summary', null, n('%n chapter', '%n chapters', b.chapters.length)),
 				h('ol.abs-list', null, b.chapters.map((c) => h('li', null, h('span', { dir: 'auto' }, c.title), h('span.abs-muted', null, fmtClock(c.start)))))),
-			h('details', null, h('summary', null, n('%n audio file', '%n audio files', b.files.length)),
+			(b.ebooks.length > 0 || (data.opds && !b.ebookOnly)) && h('details', { open: b.ebookOnly }, h('summary', null, b.ebooks.length ? n('%n ebook file', '%n ebook files', b.ebooks.length) : t('Ebook')),
+				h('ul.abs-list', null, b.ebooks.map((e) => h('li', null,
+					h('span', { dir: 'auto' }, e.name, e.opds && h('span.abs-muted', null, ' · OPDS+')),
+					h('span.abs-list-actions', null, h('span.abs-muted', null, fmtSize(e.size)),
+						h('a.button', { href: OC.generateUrl('/f/' + e.id) }, t('Show in Files')),
+						b.ebooks.length > 1 && (e.primary ? h('span.abs-muted', null, t('opens in apps')) : h('button', { type: 'button', onclick: () => change(() => api('PUT', '/web/items/' + b.id + '/ebook', { fileId: e.id })) }, t('Open this in apps'))))))),
+				data.opds && !b.ebookOnly && (!b.ebooks.length || b.ebooks[0].opds) && h('p.abs-book-actions', null,
+					h('button', { type: 'button', onclick: () => chooseEbook(b) }, t('Choose from OPDS+')),
+					b.ebooks.length > 0 && h('button', { type: 'button', onclick: () => change(() => api('PUT', '/web/items/' + b.id + '/ebook', { fileId: 0, opds: true })) }, t('No ebook')))),
+			b.bookmarks.length > 0 && h('details', { open: true }, h('summary', null, n('%n bookmark', '%n bookmarks', b.bookmarks.length)),
+				h('ul.abs-list', null, b.bookmarks.sort((x, y) => x.time - y.time).map((m) => h('li', null,
+					h('span', { dir: 'auto' }, m.title || t('Bookmark'), h('span.abs-muted', null, ' · ' + fmtClock(m.time))),
+					h('span.abs-list-actions', null,
+						h('button', { type: 'button', 'aria-label': t('Rename {title}', { title: m.title }), onclick: () => {
+							const title = window.prompt(t('Name of the bookmark'), m.title)
+							if (title !== null) change(() => api('PUT', '/web/items/' + b.id + '/bookmarks', { time: m.time, title }))
+						} }, t('Rename')),
+						h('button', { type: 'button', 'aria-label': t('Delete {title}', { title: m.title }), onclick: () => change(() => api('DELETE', '/web/items/' + b.id + '/bookmarks?time=' + m.time)) }, t('Delete'))))))),
+			!b.ebookOnly && h('details', null, h('summary', null, n('%n audio file', '%n audio files', b.files.length)),
 				h('ul.abs-list', null, b.files.map((f) => h('li', null, h('span', { dir: 'auto' }, f.name), h('span.abs-muted', null, fmtClock(f.duration) + ' · ' + fmtSize(f.size)))))),
 		]))
 	}
+
+	/** Take over what the server answered for a book. */
+	function changedBook(r) {
+		const b = data.books.find((x) => x.id === r.id)
+		if (b) for (const k of Object.keys(b)) if (k in r) b[k] = r[k]
+		render()
+	}
+
+	function editBook(b) {
+		const d = dialog('abs-edit', t('Edit details'), () => {})
+		d.dataset.backdrop = 'off'
+		const status = h('p.abs-muted', { role: 'status' })
+		const save = h('button.primary', { type: 'submit' }, t('Save'))
+		const f = {}
+		const field = (key, label, value, attrs) => {
+			f[key] = h(attrs && attrs.rows ? 'textarea' : 'input', { ...(attrs && attrs.rows ? {} : { type: 'text' }), maxlength: '500', dir: 'auto', ...attrs })
+			f[key].value = value || ''
+			return h('label.abs-field.abs-field-' + key, null, h('span', null, label), f[key])
+		}
+		const check = (key, label, value) => {
+			f[key] = h('input', { type: 'checkbox', checked: !!value })
+			return h('label.abs-check', null, f[key], h('span', null, label))
+		}
+		const series = seriesOf(b).map((x) => ({ ...x }))
+		const seriesBox = h('div')
+		const showSeries = (focus) => {
+			seriesBox.replaceChildren(...series.map((x, i) => {
+				const name = h('input', { type: 'text', value: x.name || '', maxlength: '500', dir: 'auto', list: 'abs-series-names', 'aria-label': t('Series'), oninput: (e) => { x.name = e.target.value } })
+				const seq = h('input.abs-series-no', { type: 'text', value: x.seq || '', maxlength: '20', 'aria-label': t('No. in series'), placeholder: t('No.'), oninput: (e) => { x.seq = e.target.value } })
+				name.addEventListener('change', () => {
+					const known = seriesNames().find((y) => seriesKey(y) === seriesKey(name.value))
+					if (!known) return
+					name.value = x.name = known
+					const nums = perSeries(data.books).filter((y) => y.id !== b.id && seriesKey(y.series) === seriesKey(known)).map((y) => parseFloat(y.seriesSeq)).filter((y) => !isNaN(y))
+					if (!seq.value && nums.length) seq.value = x.seq = String(Math.floor(Math.max(...nums)) + 1)
+				})
+				return h('div.abs-series-row', null, name, seq, h('button', { type: 'button', 'aria-label': t('Remove series {name}', { name: x.name || '' }), onclick: () => {
+					series.splice(i, 1)
+					showSeries()
+				} }, t('Remove')))
+			}), h('button', { type: 'button', onclick: () => {
+				series.push({ name: '', seq: '' })
+				showSeries(true)
+			} }, series.length ? t('Add another series') : t('Add to series')))
+			if (focus) seriesBox.querySelectorAll('.abs-series-row input[list]')[series.length - 1].focus()
+		}
+		const options = (id, list) => h('datalist', { id }, [...new Set(list)].sort(natural).map((x) => h('option', { value: x })))
+		const split = (v) => v.split(/[,;]/).map((x) => x.trim()).filter(Boolean)
+		d.append(closeButton(() => d.shut()), h('h3', null, t('Edit details')), h('form', { onsubmit: async (e) => {
+			e.preventDefault()
+			const used = series.filter((x) => x.name.trim())
+			save.disabled = true
+			status.className = 'abs-muted'
+			status.textContent = t('Saving…')
+			const metadata = {
+				series: used.length ? used[0].name : '', seriesSeq: used.length ? used[0].seq || '' : '', moreSeries: used.slice(1),
+				genres: split(f.genres.value), tags: split(f.tags.value), explicit: f.explicit.checked, abridged: f.abridged.checked,
+			}
+			for (const k of ['title', 'subtitle', 'author', 'narrator', 'year', 'publisher', 'language', 'isbn', 'asin', 'description']) metadata[k] = f[k].value
+			try {
+				changedBook(await api('PUT', '/web/items/' + b.id, { metadata }))
+				d.shut()
+				if (bookDialog) showBook(b.id)
+			} catch (err) {
+				status.className = 'abs-error'
+				status.textContent = err.message
+				save.disabled = false
+			}
+		} },
+		h('div.abs-fields', null,
+			field('title', t('Title'), b.title, { required: true }),
+			field('subtitle', t('Subtitle'), b.subtitle),
+			field('author', t('Author'), b.author, { list: 'abs-edit-authors' }),
+			field('narrator', t('Narrator'), b.narrator, { list: 'abs-edit-narrators' })),
+		h('h4', null, t('Series')), seriesBox,
+		h('div.abs-fields', null,
+			field('genres', t('Genres, separated by commas'), b.genres.join(', ')),
+			field('tags', t('Tags, separated by commas'), b.tags.join(', ')),
+			field('year', t('Year'), b.year, { maxlength: '16' }),
+			field('language', t('Language'), b.language, { maxlength: '64' }),
+			field('publisher', t('Publisher'), b.publisher, { maxlength: '255' }),
+			field('isbn', 'ISBN', b.isbn, { maxlength: '32' }),
+			field('asin', 'ASIN', b.asin, { maxlength: '32' }),
+			field('description', t('Description'), b.description, { rows: 5, maxlength: '20000' })),
+		check('explicit', t('Explicit'), b.explicit), check('abridged', t('Abridged'), b.abridged),
+		options('abs-edit-authors', data.books.flatMap((x) => x.authors)), options('abs-edit-narrators', data.books.flatMap((x) => x.narrators)), Series.names(),
+		h('div.abs-foot', null, status, h('p.abs-muted', null, t('Stored in Nextcloud; your files are not changed.')), save)))
+		showSeries()
+		d.showModal()
+	}
+
+	/** Give an audiobook an ebook from OPDS+. */
+	function chooseEbook(b) {
+		const d = dialog('abs-ebook', t('Choose from OPDS+'), () => {})
+		const q = h('input', { type: 'search', value: b.title, dir: 'auto', 'aria-label': t('Search title or author'), placeholder: t('Search title or author') })
+		const list = h('ul.abs-series-list')
+		const status = h('p.abs-muted', { role: 'status' })
+		const use = async (fileId) => {
+			try {
+				changedBook(await api('PUT', '/web/items/' + b.id + '/ebook', { fileId, opds: true }))
+				d.shut()
+				if (bookDialog) showBook(b.id)
+			} catch (e) {
+				status.textContent = e.message
+			}
+		}
+		let timer
+		const search = async () => {
+			try {
+				const r = await api('GET', '/web/opds?q=' + encodeURIComponent(q.value))
+				status.textContent = r.books.length ? '' : t('Nothing matches your search.')
+				list.replaceChildren(...r.books.map((x) => h('li', null,
+					h('span.abs-series-title', { dir: 'auto' }, x.title, h('span.abs-muted', null, [x.author, x.formats.join(', ')].filter(Boolean).join(' · '))),
+					h('button', { type: 'button', 'aria-label': t('Use {title}', { title: x.title }), onclick: () => use(x.fileId) }, t('Use')))))
+			} catch (e) {
+				status.textContent = e.message
+			}
+		}
+		q.addEventListener('input', () => {
+			clearTimeout(timer)
+			timer = setTimeout(search, 250)
+		})
+		d.append(closeButton(() => d.shut()), h('h3', { dir: 'auto' }, b.title), q,
+			h('p', null, h('button', { type: 'button', onclick: () => use(null) }, t('Find it automatically'))), status, list)
+		search()
+		d.showModal()
+	}
+
+	// ----- playlists and collections -----
+
+	const Lists = (function () {
+		const KINDS = { collection: t('Collections'), playlist: t('Playlists') }
+		const put = (l) => {
+			const i = data.lists.findIndex((x) => x.id === l.id)
+			if (i < 0) data.lists.push(l)
+			else data.lists[i] = l
+			data.lists.sort((a, b) => natural(a.name, b.name))
+			render()
+		}
+
+		function render_(books) {
+			const byId = new Map(books.map((b) => [b.id, b]))
+			const out = [h('div.abs-tools', null,
+				h('button', { type: 'button', onclick: () => edit(null, 'collection') }, t('New collection')),
+				h('button', { type: 'button', onclick: () => edit(null, 'playlist') }, t('New playlist')),
+				!data.lists.length && h('span.abs-muted', null, t('Collections group books. Playlists are for listening in a certain order; the app can make them too.')))]
+			for (const [kind, label] of Object.entries(KINDS)) {
+				const lists = data.lists.filter((l) => l.kind === kind)
+				if (lists.length) out.push(h('h3.abs-kind', null, label))
+				for (const l of lists) {
+					const list = l.items.map((id) => byId.get(id)).filter(Boolean)
+					out.push(h('section.abs-section', null,
+						h('h3', null, h('span', { dir: 'auto' }, l.name), h('span.abs-count', null, n('%n book', '%n books', list.length)),
+							h('button.abs-series-edit', { type: 'button', 'aria-label': t('Edit {name}', { name: l.name }), onclick: () => edit(l) }, t('Edit'))),
+						l.description && h('p.abs-muted', { dir: 'auto' }, l.description),
+						h('div.abs-row', null, list.map((b) => card(b)))))
+				}
+			}
+			return out
+		}
+
+		function edit(l, kind, first) {
+			kind = l ? l.kind : kind
+			const d = dialog('abs-list-edit', KINDS[kind], () => {})
+			d.dataset.backdrop = 'off'
+			const libs = data.libraries.filter((x) => x.id)
+			let libraryId = l ? l.libraryId : first ? first.libraryId : ui.library || (libs[0] || {}).id
+			const name = h('input', { type: 'text', value: l ? l.name : '', maxlength: '200', required: true, dir: 'auto' })
+			const desc = h('textarea', { rows: 2, maxlength: '20000', dir: 'auto' })
+			desc.value = (l && l.description) || ''
+			const status = h('p.abs-muted', { role: 'status' })
+			const save = h('button.primary', { type: 'submit' }, t('Save'))
+			const list = h('ul.abs-series-list')
+			const find = h('input', { type: 'search', placeholder: t('Search title or author'), 'aria-label': t('Add books'), dir: 'auto', oninput: () => search(), onkeydown: (e) => e.key === 'Enter' && e.preventDefault() })
+			const found = h('ul.abs-series-list')
+			let items = l ? [...l.items] : first ? [first.id] : []
+			const book = (id) => data.books.find((b) => b.id === id)
+
+			function show() {
+				const move = (i, by) => {
+					const [x] = items.splice(i, 1)
+					items.splice(i + by, 0, x)
+					show()
+				}
+				list.replaceChildren(...items.map((id, i) => {
+					const b = book(id)
+					return b && h('li', null, h('span.abs-series-title', { dir: 'auto' }, b.title, h('span.abs-muted', null, b.author)),
+						h('button', { type: 'button', disabled: i === 0, 'aria-label': t('Move {title} up', { title: b.title }), onclick: () => move(i, -1) }, '↑'),
+						h('button', { type: 'button', disabled: i === items.length - 1, 'aria-label': t('Move {title} down', { title: b.title }), onclick: () => move(i, 1) }, '↓'),
+						h('button', { type: 'button', 'aria-label': t('Remove {title}', { title: b.title }), onclick: () => {
+							items.splice(i, 1)
+							show()
+							search()
+						} }, t('Remove')))
+				}).filter(Boolean))
+				if (!items.length) list.replaceChildren(h('li.abs-muted', null, t('No books here.')))
+			}
+			function search() {
+				const words = find.value.toLocaleLowerCase().split(/\s+/).filter(Boolean)
+				const hits = data.books.filter((b) => {
+					if (b.libraryId !== libraryId || items.includes(b.id)) return false
+					const text = [b.title, b.author, b.series].filter(Boolean).join(' ').toLocaleLowerCase()
+					return words.every((w) => text.includes(w))
+				}).sort(byTitle)
+				found.replaceChildren(...hits.slice(0, 30).map((b) => h('li', null, h('span.abs-series-title', { dir: 'auto' }, b.title, h('span.abs-muted', null, b.author)),
+					h('button', { type: 'button', 'aria-label': t('Add {title}', { title: b.title }), onclick: () => {
+						items.push(b.id)
+						show()
+						search()
+					} }, t('Add')))))
+				if (hits.length > 30) found.append(h('li.abs-muted', null, t('Search to see more books.')))
+			}
+
+			d.append(...kids([closeButton(() => d.shut()), h('h3', null, l ? t('Edit list') : kind === 'playlist' ? t('New playlist') : t('New collection')),
+				h('form', { onsubmit: async (e) => {
+					e.preventDefault()
+					save.disabled = true
+					try {
+						const body = { kind, libraryId, name: name.value, description: desc.value, items }
+						put(await api(l ? 'PUT' : 'POST', '/web/lists' + (l ? '/' + l.id : ''), body))
+						d.shut()
+					} catch (err) {
+						status.className = 'abs-error'
+						status.textContent = err.message
+						save.disabled = false
+					}
+				} }, h('label.abs-field', null, h('span', null, t('Name')), name),
+				h('label.abs-field', null, h('span', null, t('Description')), desc),
+				!l && !first && libs.length > 1 ? select(t('Library'), libs.map((x) => [x.id, x.name]), libraryId, (v) => {
+					libraryId = v
+					items = []
+					show()
+					search()
+				}) : null,
+				h('h4', null, t('Books')), list, h('h4', null, t('Add books')), find, found,
+				h('div.abs-foot', null, status, l && h('button', { type: 'button', onclick: async () => {
+					if (!window.confirm(t('Delete "{name}"? The books stay.', { name: l.name }))) return
+					try {
+						await api('DELETE', '/web/lists/' + l.id)
+						data.lists = data.lists.filter((x) => x.id !== l.id)
+						d.shut()
+						render()
+					} catch (err) {
+						status.textContent = err.message
+					}
+				} }, t('Delete list')), save))]))
+			show()
+			search()
+			d.showModal()
+			if (!l) name.focus()
+		}
+
+		/** Tick the lists a book is on. */
+		function choose(b) {
+			const d = dialog('abs-list-choose', t('Add to list'), () => {})
+			const box = h('div')
+			const show = () => box.replaceChildren(...data.lists.filter((l) => l.libraryId === b.libraryId).map((l) => {
+				const input = h('input', { type: 'checkbox', checked: l.items.includes(b.id), onchange: async () => {
+					input.disabled = true
+					try {
+						put(await api('PUT', '/web/lists/' + l.id, { name: l.name, description: l.description || '', items: input.checked ? [...l.items, b.id] : l.items.filter((x) => x !== b.id) }))
+					} catch (e) {
+						toast(e.message, true)
+					}
+					show()
+				} })
+				return h('label.abs-check', null, input, h('span', { dir: 'auto' }, l.name, h('span.abs-muted', null, ' · ' + (l.kind === 'playlist' ? t('Playlist') : t('Collection')))))
+			}))
+			const create = (kind) => () => {
+				d.shut()
+				edit(null, kind, b)
+			}
+			d.append(closeButton(() => d.shut()), h('h3', { dir: 'auto' }, b.title), box, h('p.abs-book-actions', null,
+				h('button', { type: 'button', onclick: create('collection') }, t('New collection')),
+				h('button', { type: 'button', onclick: create('playlist') }, t('New playlist'))))
+			show()
+			d.showModal()
+		}
+
+		return { render: render_, choose }
+	})()
+
+	// ----- statistics -----
+
+	const Stats = (function () {
+		let year = new Date().getFullYear()
+		let cache = null
+		const hours = (sec) => (sec < 3600 ? t('{m} min', { m: Math.round(sec / 60) }) : fmtDuration(sec))
+
+		async function load_() {
+			const want = year
+			try {
+				const r = await api('GET', '/web/stats?year=' + want)
+				if (want !== year) return
+				cache = { year: want, r }
+			} catch (e) {
+				cache = { year: want, error: e.message }
+			}
+			if (view === 'stats') render()
+		}
+
+		function render_() {
+			if (!cache || cache.year !== year) {
+				load_()
+				return [h('p.abs-none', null, t('Loading…'))]
+			}
+			if (cache.error) return [h('p.abs-error', null, cache.error)]
+			const { r } = cache
+			const y = r.year
+			const now = new Date().getFullYear()
+			const row = (label, value) => value && h('div', null, h('dt', null, label), h('dd', { dir: 'auto' }, value))
+			const top = (list, key) => list.map((x) => x[key] + ' (' + hours(x.time) + ')').join(', ')
+			const week = [...Array(7)].map((_, i) => {
+				const d = new Date()
+				d.setDate(d.getDate() - 6 + i)
+				const key = [d.getFullYear(), String(d.getMonth() + 1).padStart(2, '0'), String(d.getDate()).padStart(2, '0')].join('-')
+				return [d.toLocaleDateString(undefined, { weekday: 'short' }), r.days[key] || 0]
+			})
+			const max = Math.max(1, ...week.map((x) => x[1]))
+			return [
+				h('section.abs-section', null, h('h3', null, t('Last 7 days')),
+					h('div.abs-week', { role: 'img', 'aria-label': week.map(([d, s]) => d + ': ' + hours(s)).join(', ') }, week.map(([d, s]) => {
+						const bar = h('span.abs-week-bar')
+						bar.style.height = Math.round(s / max * 90) + 'px'
+						return h('div', null, h('span.abs-muted', null, s ? hours(s) : ''), bar, h('span', null, d))
+					})),
+					h('p.abs-muted', null, t('{total} listened in all, {today} today.', { total: hours(r.total), today: hours(r.today) }))),
+				h('section.abs-section', null, h('h3', null, t('Year in review')),
+					h('div.abs-tools', null, select(t('Year'), [...Array(3)].map((_, i) => [String(now - i), String(now - i)]), String(year), (v) => {
+						year = +v
+						render()
+					})),
+					h('dl.abs-stats', null,
+						row(t('Time listened'), hours(y.totalListeningTime)), row(t('Books listened to'), String(y.numBooksListened)), row(t('Books finished'), String(y.numBooksFinished)),
+						row(t('Sessions'), String(y.totalListeningSessions)), row(t('Top authors'), top(y.topAuthors, 'name')), row(t('Top genres'), top(y.topGenres, 'genre')),
+						row(t('Top narrator'), y.mostListenedNarrator && top([y.mostListenedNarrator], 'name')),
+						row(t('Busiest month'), y.mostListenedMonth && new Date(y.year || year, y.mostListenedMonth.month, 1).toLocaleDateString(undefined, { month: 'long' }) + ' (' + hours(y.mostListenedMonth.time) + ')'),
+						row(t('Longest book finished'), y.longestAudiobookFinished && y.longestAudiobookFinished.title + ' (' + hours(y.longestAudiobookFinished.duration) + ')'))),
+				h('p.abs-muted', null, t('Listening sessions are kept for two years.')),
+			]
+		}
+
+		return { render: render_ }
+	})()
 
 	// ----- covers -----
 
@@ -375,7 +930,7 @@
 			render()
 		}
 
-		const missing = () => data.books.filter((b) => !b.hasCover)
+		const missing = () => data.books.filter((b) => !b.hasCover && !b.ebookOnly)
 		const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 		function openAll() {
@@ -601,7 +1156,7 @@
 				}))
 			}
 			d.append(drop, h('datalist', { id: 'abs-authors' }, [...new Set(data.books.flatMap((b) => b.authors))].sort(natural).map((x) => h('option', { value: x }))),
-				h('datalist', { id: 'abs-series' }, [...new Set(data.books.map((b) => b.series).filter(Boolean))].sort(natural).map((x) => h('option', { value: x }))),
+				h('datalist', { id: 'abs-series' }, seriesNames().map((x) => h('option', { value: x }))),
 				list, footer)
 			update()
 		}

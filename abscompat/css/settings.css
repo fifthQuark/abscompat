@@ -14,3 +14,6 @@
 .abscompat table { max-width: 800px; width: 100%; }
 .abscompat td, .abscompat th { padding: 6px 8px; text-align: start; }
 .abscompat th { color: var(--color-text-maxcontrast); font-weight: normal; }
+.abscompat .abscompat-warning { max-width: 700px; margin: 8px 0; padding: 8px 12px; border-inline-start: 4px solid var(--color-warning); border-radius: var(--border-radius); background: var(--color-background-hover); }
+.abscompat .abscompat-warning ul { list-style: disc; padding-inline-start: 20px; }
+.abscompat .abscompat-warning li { margin: 4px 0; }

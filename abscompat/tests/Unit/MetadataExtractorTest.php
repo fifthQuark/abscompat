@@ -50,6 +50,18 @@ class MetadataExtractorTest extends TestCase {
 		$this->assertSame('2', $m['tags']['track']);
 	}
 
+	public function testSeriesTags(): void {
+		$x = new MetadataExtractor(new NullLogger());
+		$tags = function (string $f) use ($x): array {
+			$t = $x->extract($this->file($f), false)['tags'];
+			return [$t['series'] ?? null, $t['seriesPart'] ?? null, $t['grouping'] ?? null];
+		};
+		$this->assertSame(['Saga é', '3/7', null], $tags('series-text.mp3'));
+		$this->assertSame(['Saga é', '4', null], $tags('series-movement.mp3'));
+		$this->assertSame([null, null, 'Saga #2.5; Other #1'], $tags('series-grouping.mp3'));
+		$this->assertSame(['Saga', '6', null], $tags('series.m4b'));
+	}
+
 	public function testUnreadableFileGivesEmptyMetadata(): void {
 		$storage = $this->createMock(IStorage::class);
 		$storage->method('getLocalFile')->willReturn(false);
@@ -57,6 +69,7 @@ class MetadataExtractorTest extends TestCase {
 		$file->method('getStorage')->willReturn($storage);
 		$m = (new MetadataExtractor(new NullLogger()))->extract($file, false);
 		$this->assertSame(0.0, $m['duration']);
+		$this->assertArrayNotHasKey('v', $m, 'so it is tried again');
 	}
 
 	public function testMalformedTextIsCleaned(): void {

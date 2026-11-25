@@ -70,8 +70,16 @@ function assertKotlinLibraryItem(li, expanded) {
   }
 }
 
+const adminBasic = 'Basic ' + Buffer.from(`${env.NC_ADMIN_USER}:${env.NC_ADMIN_PASSWORD}`).toString('base64')
+
 async function run(prefix) {
   const base = env.NC_URL + prefix
+  const webSettings = async (method, path, body) => {
+    const r = await fetch(base + path, { method, headers: { authorization: adminBasic, 'OCS-APIRequest': 'true', 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined })
+    assert.equal(r.status, 200, `${method} ${path}: ${r.status}`)
+    return r.json()
+  }
+  const streaming = async (enabled) => assert.equal((await webSettings('PUT', '/settings/streaming', { enabled })).streaming.on, enabled)
   console.log(`\n== ${base}`)
   const token = { value: null }
   const api = client(base, token)
@@ -228,9 +236,12 @@ async function run(prefix) {
     assert.ok(Buffer.from(await suf.arrayBuffer()).equals(body.subarray(body.length - 5)))
     const bad = await api('GET', url, { raw: true, headers: { range: `bytes=${body.length + 10}-` } })
     assert.equal(bad.status, 416)
-    // Direct-play URL with ?token= works too
+    // A player's link (?token=) is streaming: refused until that is switched on.
+    assert.equal((await fetch(`${base}/api/items/${m4b.id}/file/${ino}?token=${token.value}`)).status, 403)
+    await streaming(true)
     const dp = await fetch(`${base}/api/items/${m4b.id}/file/${ino}?token=${token.value}`, { headers: { range: 'bytes=0-3' } })
     assert.equal(dp.status, 206)
+    await streaming(false)
   })
   await check('download of a file outside the item is refused', async () => {
     const otherIno = (await api('GET', `/api/items/${mp3book.id}?expanded=1`)).json.media.audioFiles[0].ino
@@ -285,6 +296,48 @@ async function run(prefix) {
     assert.equal(r.json.book[0].libraryItem.id, m4b.id)
     assert.equal(r.json.book[0].libraryItem.media.metadata.authorName, 'Ada Author')
   })
+  await check('streaming is off until the user turns it on; Voice may still report sessions; downloads work', async () => {
+    const play = (mediaPlayer) => api('POST', `/api/items/${mp3book.id}/play`, { body: { deviceInfo: { deviceId: 'dev0' }, forceDirectPlay: true, mediaPlayer } })
+    assert.equal((await play('exo-player')).status, 403)
+    const voice = await play('Voice')
+    assert.equal(voice.status, 200)
+    assert.equal((await fetch(`${base}/public/session/${voice.json.id}/track/1`)).status, 403)
+    assert.equal((await api('POST', `/api/session/${voice.json.id}/close`, { body: {} })).status, 200)
+    const ino = (await api('GET', `/api/items/${mp3book.id}?expanded=1`)).json.media.audioFiles[0].ino
+    assert.equal((await api('GET', `/api/items/${mp3book.id}/file/${ino}/download`, { raw: true })).status, 200)
+    assert.equal((await api('GET', `/api/items/${mp3book.id}/file/${ino}`, { raw: true })).status, 200)
+  })
+  await check('streaming: the apps\' track address works while the session is open, and only then', async () => {
+    await streaming(true)
+    const s = (await api('POST', `/api/items/${mp3book.id}/play`, { body: { deviceInfo: { deviceId: 'dev1' }, mediaPlayer: 'exo-player' } })).json
+    const track = (i, headers, id = s.id) => fetch(`${base}/public/session/${id}/track/${i}`, { headers })
+    const full = await track(2)
+    assert.equal(full.status, 200)
+    assert.equal(full.headers.get('content-type'), 'audio/mpeg')
+    const all = Buffer.from(await full.arrayBuffer())
+    const part = await track(2, { range: 'bytes=100-199' })
+    assert.equal(part.status, 206)
+    assert.ok(Buffer.from(await part.arrayBuffer()).equals(all.subarray(100, 200)))
+    for (const i of ['0', '3', 'x', '-1']) assert.equal((await track(i)).status, 404, i)
+    for (const id of ['nope', '00000000-0000-4000-a000-000000000000', s.id.toUpperCase() + 'x']) assert.equal((await track(1, {}, id)).status, 404, id)
+    assert.equal((await api('GET', `/api/session/${s.id}`)).json.libraryItemId, mp3book.id)
+    await streaming(false)
+    assert.equal((await track(1)).status, 403, 'switching it off ends it')
+    await streaming(true)
+    assert.equal((await track(1)).status, 200)
+    await api('POST', `/api/session/${s.id}/close`, { body: {} })
+    assert.equal((await track(1)).status, 404, 'closed')
+    // Signing out a device ends open streams.
+    const s2 = (await api('POST', `/api/items/${mp3book.id}/play`, { body: { mediaPlayer: 'exo-player' } })).json
+    const other = await client(base, { value: null })('POST', '/login', { body: { username: env.NC_ADMIN_USER, password: env.NC_ADMIN_PASSWORD } })
+    assert.equal((await track(1, {}, s2.id)).status, 200)
+    await client(base, { value: other.json.user.accessToken })('POST', '/logout')
+    assert.equal((await track(1, {}, s2.id)).status, 404, 'signed out')
+    await api('POST', `/api/session/${s2.id}/sync`, { body: { currentTime: 1, timeListened: 0 } })
+    assert.equal((await track(1, {}, s2.id)).status, 200, 'an app that is still signed in goes on')
+    await api('POST', `/api/session/${s2.id}/close`, { body: {} })
+    await api('DELETE', `/api/me/progress/${mp3book.id}`)
+  })
   await check('streaming session: play -> sync -> close updates progress', async () => {
     const r = await api('POST', `/api/items/${mp3book.id}/play`, { body: { deviceInfo: { deviceId: 'dev1', manufacturer: 'Test', model: 'Phone', sdkVersion: 34, clientVersion: '0.14.2' }, forceDirectPlay: true, mediaPlayer: 'exo-player', supportedMimeTypes: ['audio/mpeg'] } })
     assert.equal(r.status, 200, r.text)
@@ -301,6 +354,18 @@ async function run(prefix) {
     assert.equal(p.currentTime, 75)
     assert.ok(Math.abs(p.progress - 75 / s.duration) < 0.001)
     assert.equal((await api('POST', `/api/session/nope/sync`, { body: { currentTime: 1 } })).status, 404)
+    await streaming(false)
+  })
+  await check('admin can forbid streaming', async () => {
+    await streaming(true)
+    const admin = (allowStreaming) => webSettings('PUT', '/settings/admin', { allowStreaming })
+    assert.equal((await admin(false)).allowStreaming, false)
+    assert.equal((await api('POST', `/api/items/${mp3book.id}/play`, { body: { mediaPlayer: 'exo-player' } })).status, 403)
+    assert.deepEqual((await webSettings('GET', '/settings')).streaming, { allowed: false, on: false })
+    const refused = await fetch(base + '/settings/streaming', { method: 'PUT', headers: { authorization: adminBasic, 'OCS-APIRequest': 'true', 'content-type': 'application/json' }, body: '{"enabled":true}' })
+    assert.equal(refused.status, 403)
+    assert.equal((await admin(true)).allowStreaming, true)
+    await streaming(false)
   })
   await check('offline phone sync: /api/session/local-all, newer local wins', async () => {
     const now = Date.now()
@@ -386,6 +451,156 @@ async function run(prefix) {
     assert.equal(c.collapsedSeries.numBooks, 2)
     assert.deepEqual(c.collapsedSeries.libraryItemIds, [mp3book.id, book2.id])
   })
+  await check('collapsed series count, also with an author filter; not inside a series', async () => {
+    const bob = (await api('GET', `/api/libraries/${libId}/authors`)).json.authors.find((a) => a.name === 'Bob Writer')
+    const enc = (s) => encodeURIComponent(Buffer.from(s).toString('base64'))
+    const r = await api('GET', `/api/libraries/${libId}/items?limit=1000&minified=1&filter=authors.${enc(bob.id)}&sort=media.metadata.title&collapseseries=1`)
+    assert.equal(r.json.total, 1)
+    assert.equal(r.json.results[0].id, mp3book.id, 'the first book by number, not by title')
+    assert.ok(!('seriesSequenceList' in r.json.results[0].collapsedSeries), 'the app would show it instead of the count')
+    const sid = r.json.results[0].collapsedSeries.id
+    const inside = await api('GET', `/api/libraries/${libId}/items?minified=1&limit=10&filter=series.${enc(sid)}&collapseseries=1`)
+    assert.deepEqual(inside.json.results.map((i) => i.id), [mp3book.id, book2.id])
+    assert.deepEqual(inside.json.results.map((i) => i.media.metadata.series), [1, 2].map((n) => ({ id: sid, name: 'Star Saga', sequence: String(n) })))
+    for (const i of inside.json.results) assertKotlinLibraryItem(i, false)
+    const none = await api('GET', `/api/libraries/${libId}/items?minified=1&filter=series.${enc('no-series')}`)
+    assert.deepEqual(none.json.results.map((i) => i.id).sort(), [m4b.id, rootmp3.id].sort())
+    assert.equal((await api('GET', `/api/libraries/${libId}/series/${sid}`)).json.name, 'Star Saga')
+  })
+  await check('search finds series with their books', async () => {
+    const r = await api('GET', `/api/libraries/${libId}/search?q=star%20sag&limit=12`)
+    assert.equal(r.json.series.length, 1)
+    for (const k of ['id', 'libraryId', 'name', 'addedAt', 'updatedAt']) assert.ok(r.json.series[0].series[k] !== undefined && r.json.series[0].series[k] !== null, k)
+    assert.deepEqual(r.json.series[0].books.map((b) => b.id), [mp3book.id, book2.id])
+    for (const b of r.json.series[0].books) assertKotlinLibraryItem(b, false)
+    assert.deepEqual((await api('GET', `/api/libraries/${libId}/search?q=rising`)).json.series, [])
+  })
+  await check('continue-series offers the next book once one is finished', async () => {
+    const shelf = async () => (await api('GET', `/api/libraries/${libId}/personalized?minified=1`)).json.find((s) => s.id === 'continue-series')
+    const clear = async () => { for (const b of [mp3book, book2]) await api('DELETE', `/api/me/progress/mp_${b.id}`) }
+    await clear()
+    assert.equal(await shelf(), undefined)
+    await api('PATCH', `/api/me/progress/${mp3book.id}`, { body: { isFinished: true } })
+    const s = await shelf()
+    assert.deepEqual([s.type, s.total, s.entities.map((e) => e.id)], ['book', 1, [book2.id]])
+    assert.equal(s.entities[0].media.metadata.series.sequence, '2')
+    assertKotlinLibraryItem(s.entities[0], false)
+    await api('PATCH', `/api/me/progress/${book2.id}`, { body: { currentTime: 2, duration: 100 } })
+    assert.equal(await shelf(), undefined, 'now under continue-listening')
+    await api('PATCH', `/api/me/progress/${book2.id}`, { body: { isFinished: true } })
+    assert.equal(await shelf(), undefined, 'series finished')
+    await clear()
+  })
+  await check('playlists: create, add, reorder, remove, gone when empty', async () => {
+    const bad = [{}, { name: 'P', libraryId: 'x' }, { name: ' ', libraryId: libId }, { name: 'P', libraryId: libId, items: [{ libraryItemId: 'nope' }] }, { name: 'P', libraryId: libId, items: [{ libraryItemId: m4b.id, episodeId: 'e' }] }]
+    for (const body of bad) assert.equal((await api('POST', '/api/playlists', { body })).status, 400, JSON.stringify(body))
+    const p = (await api('POST', '/api/playlists', { body: { name: 'Road <b>trip</b>', libraryId: libId, items: [{ libraryItemId: m4b.id }] } })).json
+    assert.equal(p.name, 'Road trip')
+    for (const k of ['id', 'libraryId', 'userId', 'lastUpdate', 'createdAt']) assert.ok(p[k] !== undefined && p[k] !== null, k)
+    const ids = (x) => x.items.map((i) => i.libraryItemId)
+    assert.deepEqual(ids((await api('POST', `/api/playlists/${p.id}/item`, { body: { libraryItemId: mp3book.id } })).json), [m4b.id, mp3book.id])
+    assert.deepEqual(ids((await api('POST', `/api/playlists/${p.id}/batch/add`, { body: { items: [{ libraryItemId: book2.id }, { libraryItemId: m4b.id }] } })).json), [m4b.id, mp3book.id, book2.id])
+    assert.deepEqual(ids((await api('PATCH', `/api/playlists/${p.id}`, { body: { name: 'New', items: [book2, m4b, mp3book].map((b) => ({ libraryItemId: b.id })) } })).json), [book2.id, m4b.id, mp3book.id])
+    const got = (await api('GET', `/api/playlists/${p.id}`)).json
+    assert.equal(got.name, 'New')
+    for (const i of got.items) assertKotlinLibraryItem(i.libraryItem, true)
+    const page = (await api('GET', `/api/libraries/${libId}/playlists?limit=10&page=0`)).json
+    assert.deepEqual([page.total, page.results[0].id], [1, p.id])
+    assert.equal((await api('GET', `/api/libraries/${libId}?include=filterdata`)).json.numUserPlaylists, 1)
+    assert.deepEqual(ids((await api('DELETE', `/api/playlists/${p.id}/item/${m4b.id}`)).json), [book2.id, mp3book.id])
+    assert.deepEqual(ids((await api('POST', `/api/playlists/${p.id}/batch/remove`, { body: { items: [{ libraryItemId: book2.id }, { libraryItemId: mp3book.id }] } })).json), [])
+    assert.equal((await api('GET', `/api/playlists/${p.id}`)).status, 404)
+  })
+  await check('collections: create, add, reorder, remove, to playlist, delete', async () => {
+    assert.equal((await api('POST', '/api/collections', { body: { name: 'C', libraryId: libId, books: [] } })).status, 400)
+    const c = (await api('POST', '/api/collections', { body: { name: 'Best', libraryId: libId, description: 'd', books: [m4b.id] } })).json
+    const ids = (x) => x.books.map((b) => b.id)
+    assert.deepEqual([c.description, ids(c)], ['d', [m4b.id]])
+    assertKotlinLibraryItem(c.books[0], true)
+    assert.deepEqual(ids((await api('POST', `/api/collections/${c.id}/book`, { body: { id: book2.id } })).json), [m4b.id, book2.id])
+    assert.deepEqual(ids((await api('POST', `/api/collections/${c.id}/batch/add`, { body: { books: [mp3book.id] } })).json), [m4b.id, book2.id, mp3book.id])
+    assert.deepEqual(ids((await api('PATCH', `/api/collections/${c.id}`, { body: { books: [mp3book.id, m4b.id, book2.id], description: '' } })).json), [mp3book.id, m4b.id, book2.id])
+    assert.deepEqual(ids((await api('DELETE', `/api/collections/${c.id}/book/${m4b.id}`)).json), [mp3book.id, book2.id])
+    assert.deepEqual((await api('GET', `/api/libraries/${libId}/collections?minified=1`)).json.results.map((x) => x.id), [c.id])
+    const p = (await api('POST', `/api/playlists/collection/${c.id}`)).json
+    assert.deepEqual([p.name, p.items.length], ['Best', 2])
+    for (const x of [`/api/playlists/${p.id}`, `/api/collections/${c.id}`]) {
+      assert.equal((await api('DELETE', x)).status, 200)
+      assert.equal((await api('GET', x)).status, 404)
+    }
+  })
+  await check('details: tags, several series, publisher and more; filters, search and lists know them', async () => {
+    const id = rootmp3.id
+    const before = (await api('GET', `/api/items/${id}?expanded=1`)).json.media.metadata
+    const enc = (s) => encodeURIComponent(Buffer.from(s).toString('base64'))
+    const r = await api('PATCH', `/api/items/${id}/media`, { body: { metadata: { subtitle: 'Sub', publisher: 'Pub & Co', language: 'English', isbn: '123', asin: 'B0', publishedYear: '1999', genres: ['Odd'], narrators: ['Zed Voice'], description: 'D', explicit: true, abridged: true, series: [{ name: 'Tales', sequence: '3' }, { name: 'Star Saga', sequence: '1.5' }] }, tags: ['Fav', 'Fav', ' '] } })
+    assert.equal(r.status, 200, r.text)
+    const m = r.json.libraryItem.media
+    assertKotlinLibraryItem(r.json.libraryItem, true)
+    assert.deepEqual([m.tags, m.metadata.publisher, m.metadata.language, m.metadata.isbn, m.metadata.asin, m.metadata.explicit, m.metadata.abridged, m.metadata.publishedYear, m.metadata.subtitle], [['Fav'], 'Pub & Co', 'English', '123', 'B0', true, true, '1999', 'Sub'])
+    assert.equal(m.metadata.seriesName, 'Tales #3, Star Saga #1.5')
+    const saga = (await api('GET', `/api/libraries/${libId}/series?limit=100`)).json.results.find((s) => s.name === 'Star Saga')
+    assert.deepEqual(saga.books.map((b) => b.id), [mp3book.id, id, book2.id])
+    const inSaga = (await api('GET', `/api/libraries/${libId}/items?minified=1&filter=series.${enc(saga.id)}`)).json.results
+    assert.deepEqual(inSaga.map((b) => [b.id, b.media.metadata.series.sequence]), [[mp3book.id, '1'], [id, '1.5'], [book2.id, '2']])
+    const fd = (await api('GET', `/api/libraries/${libId}/filterdata`)).json
+    assert.ok(fd.tags.includes('Fav') && fd.publishers.includes('Pub & Co') && fd.languages.includes('English') && fd.publishedDecades.includes('1990') && fd.narrators.includes('Zed Voice'))
+    for (const f of ['tags.Fav', 'publishers.Pub & Co', 'languages.English', 'publishedDecades.1990', 'narrators.Zed Voice', 'genres.Odd']) {
+      const [g, v] = f.split('.')
+      assert.deepEqual((await api('GET', `/api/libraries/${libId}/items?minified=1&filter=${g}.${enc(v)}`)).json.results.map((b) => b.id), [id], f)
+    }
+    const s = (q) => api('GET', `/api/libraries/${libId}/search?q=${q}`).then((x) => x.json)
+    assert.deepEqual([(await s('fav')).tags, (await s('odd')).genres, (await s('zed')).narrators], [[{ name: 'Fav', numItems: 1 }], [{ name: 'Odd', numItems: 1 }], [{ name: 'Zed Voice', numBooks: 1 }]])
+    const au = (await s('bob')).authors
+    assert.deepEqual(au.map((a) => [a.name, a.numBooks]), [['Bob Writer', 2]])
+    for (const k of ['id', 'libraryId', 'name', 'addedAt', 'updatedAt']) assert.ok(au[0][k] !== undefined && au[0][k] !== null, k)
+    assert.ok((await api('GET', `/api/libraries/${libId}/narrators`)).json.narrators.some((x) => x.name === 'Zed Voice'))
+    assert.ok((await api('GET', '/api/tags')).json.tags.includes('Fav') && (await api('GET', '/api/genres')).json.genres.includes('Odd'))
+    // An edit of something else keeps all of it.
+    await api('POST', '/api/items/batch/update', { body: [{ id, mediaPayload: { metadata: { title: 'Short Story' } } }] })
+    const basic = { authorization: adminBasic, 'OCS-APIRequest': 'true' }
+    await fetch(`${env.NC_URL}/apps/abscompat/settings/rescan`, { method: 'POST', headers: basic })
+    const kept = (await api('GET', `/api/items/${id}?expanded=1`)).json.media
+    assert.deepEqual([kept.tags, kept.metadata.seriesName, kept.metadata.publisher], [['Fav'], 'Tales #3, Star Saga #1.5', 'Pub & Co'])
+    await api('PATCH', `/api/items/${id}/media`, { body: { metadata: { subtitle: before.subtitle, publisher: null, language: null, isbn: null, asin: null, publishedYear: before.publishedYear, genres: before.genres, narrators: before.narrators, description: before.description, explicit: false, abridged: false, series: [] }, tags: [] } })
+  })
+  await check('series: description, rename and hiding', async () => {
+    const all = async () => (await api('GET', `/api/libraries/${libId}/series?limit=100`)).json.results
+    const id = (await all())[0].id
+    assert.equal((await api('PATCH', `/api/series/${id}`, { body: { description: 'About' } })).json.description, 'About')
+    const r = (await api('PATCH', `/api/series/${id}`, { body: { name: 'Moon Saga' } })).json
+    assert.deepEqual([r.name, r.description], ['Moon Saga', 'About'])
+    assert.deepEqual((await all()).map((s) => [s.name, s.description, s.books.length]), [['Moon Saga', 'About', 2]])
+    const back = (await api('PATCH', `/api/series/${r.id}`, { body: { name: 'Star Saga', description: '' } })).json
+    assert.deepEqual([back.id, back.description], [id, null])
+    await api('PATCH', `/api/me/progress/${mp3book.id}`, { body: { isFinished: true } })
+    const shelf = async () => (await api('GET', `/api/libraries/${libId}/personalized`)).json.some((s) => s.id === 'continue-series')
+    assert.equal(await shelf(), true)
+    assert.deepEqual((await api('GET', `/api/me/series/${id}/remove-from-continue-listening`)).json.seriesHideFromContinueListening, [id])
+    assert.equal(await shelf(), false)
+    assert.deepEqual((await api('GET', `/api/me/series/${id}/readd-to-continue-listening`)).json.seriesHideFromContinueListening, [])
+    assert.equal(await shelf(), true)
+    assert.equal((await api('GET', '/api/me/series/ser_nope/remove-from-continue-listening')).status, 404)
+    await api('DELETE', `/api/me/progress/${mp3book.id}`)
+  })
+  await check('discover, year in review, hiding a book from continue listening', async () => {
+    const shelves = async () => (await api('GET', `/api/libraries/${libId}/personalized`)).json
+    const d = (await shelves()).find((s) => s.id === 'discover')
+    assert.ok(d.entities.some((b) => b.id === mp3book.id) && !d.entities.some((b) => b.id === book2.id), 'only the first book of a series')
+    await api('PATCH', `/api/me/progress/${mp3book.id}`, { body: { currentTime: 5, duration: 100 } })
+    const cont = async () => (await shelves()).find((s) => s.id === 'continue-listening')?.entities.some((b) => b.id === mp3book.id) === true
+    assert.equal(await cont(), true)
+    assert.equal((await api('GET', `/api/me/progress/mp_${mp3book.id}/remove-from-continue-listening`)).status, 200)
+    assert.equal(await cont(), false)
+    await api('DELETE', `/api/me/progress/${mp3book.id}`)
+    const y = await api('GET', `/api/me/stats/year/${new Date().getFullYear()}`)
+    assert.equal(y.status, 200, y.text)
+    assert.ok(y.json.totalListeningTime >= 15 && y.json.totalListeningSessions > 0 && y.json.topAuthors.length > 0)
+    for (const k of ['topGenres', 'booksWithCovers', 'finishedBooksWithCovers']) assert.ok(Array.isArray(y.json[k]), k)
+    assert.equal((await api('GET', '/api/me/stats/year/abc')).status, 400)
+    assert.ok(Array.isArray((await api('GET', '/api/me/progress')).json.mediaProgress) && Array.isArray((await api('GET', '/api/me/bookmarks')).json.bookmarks))
+    assert.ok((await api('GET', `/api/libraries/${libId}/stats`)).json.totalItems === 4)
+  })
   await check('home shelves include recent-series (series entities) and newest-authors', async () => {
     const r = await api('GET', `/api/libraries/${libId}/personalized?minified=1`)
     const ser = r.json.find((s) => s.id === 'recent-series')
@@ -436,6 +651,17 @@ async function run(prefix) {
     assert.equal(it.media.metadata.seriesName, '')
     assert.deepEqual(it.media.metadata.series, [])
     assert.equal(it.media.metadata.authorName, 'Cleo Teller')
+  })
+  await check('another user sees none of the lists and cannot change them', async () => {
+    const c = (await api('POST', '/api/collections', { body: { name: 'Mine', libraryId: libId, books: [m4b.id] } })).json
+    const login = await client(base, { value: null })('POST', '/login', { body: { username: env.NC_PLAIN_USER, password: env.NC_PLAIN_PASSWORD } })
+    const other = client(base, { value: login.json.user.accessToken })
+    for (const [m, p] of [['GET', ''], ['PATCH', ''], ['DELETE', ''], ['POST', '/book'], ['POST', '/batch/remove']]) assert.equal((await other(m, `/api/collections/${c.id}${p}`, m === 'GET' ? {} : { body: { id: m4b.id, name: 'x', books: [m4b.id] } })).status, 404, m + p)
+    assert.equal((await other('POST', '/api/collections', { body: { name: 'x', libraryId: libId, books: [m4b.id] } })).status, 400)
+    assert.deepEqual((await other('GET', '/api/collections')).json.collections, [])
+    assert.equal((await client(base, { value: null })('GET', '/api/collections')).status, 401)
+    await other('POST', '/logout')
+    await api('DELETE', `/api/collections/${c.id}`)
   })
   await check('user permissions allow update (metadata edits) and download', async () => {
     const me = await api('GET', '/api/me')

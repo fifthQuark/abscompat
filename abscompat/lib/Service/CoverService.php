@@ -243,7 +243,7 @@ class CoverService {
 		}
 		$found = 0;
 		foreach ($this->library->visibleItemRows($userId) as $row) {
-			if ($row['cover_file_id'] !== null || $row['cover_cache'] !== null) {
+			if (Serializer::hasCover($row) || Serializer::isEbookOnly($row)) {
 				continue;
 			}
 			$tried = (int)($this->library->getOverrides($userId, (string)$row['item_key'])['coverTried'] ?? 0);

@@ -2,7 +2,7 @@
 # Installs a built release tarball into fresh Nextcloud containers and runs all test suites.
 #   dev/test-matrix.sh abscompat/build/abscompat-X.Y.Z.tar.gz [versions...]   (default: 33 34 35)
 #   DB=sqlite|mysql|pgsql (default sqlite; mysql = MariaDB), DOCKER=docker to use docker, KEEP=1
-#   to keep the containers. Needs node, ffmpeg; CROSSPOINT_DIR optional.
+#   to keep the containers. Needs node, ffmpeg; CROSSPOINT_DIR and OPDS_DIR (an OPDS+ checkout, only read) optional.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 TARBALL=$(realpath "$1"); shift
@@ -77,6 +77,15 @@ for v in $VERSIONS; do
   echo "- settings"; ENV_FILE=$envf node dev/settings-e2e.mjs | quiet || rc=1
   echo "- scanner";  ENV_FILE=$envf NC_CONTAINER=$name DOCKER=$D node dev/scan-e2e.mjs | quiet || rc=1
   echo "- web";      ENV_FILE=$envf node dev/web-e2e.mjs | quiet || rc=1
+  if [ -n "${OPDS_DIR:-}" ]; then
+    echo "- opds"
+    $D exec "$name" mkdir -p /var/www/html/custom_apps/opds
+    # The committed state, read from the repository without touching it.
+    git -C "$OPDS_DIR" archive HEAD | $D exec -i "$name" tar -x -C /var/www/html/custom_apps/opds
+    $D exec "$name" chown -R www-data: /var/www/html/custom_apps/opds
+    $D exec -u www-data "$name" php occ app:enable opds >/dev/null
+    ENV_FILE=$envf NC_CONTAINER=$name DOCKER=$D node dev/opds-e2e.mjs | quiet || rc=1
+  fi
   if [ -n "${CROSSPOINT_DIR:-}" ]; then
     echo "- crosspoint"
     ENV_FILE=$envf CROSSPOINT_DIR=$CROSSPOINT_DIR "$CROSSPOINT_DIR/node_modules/.bin/tsx" dev/crosspoint-e2e.mts | quiet || rc=1

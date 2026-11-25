@@ -74,11 +74,14 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/crosspoint-reader/crosspoint-sync /tmp/crosspoint-sync
           cd /tmp/crosspoint-sync && npm ci --ignore-scripts --no-audit --no-fund
+      - name: OPDS+ checkout (its data must stay untouched)
+        run: git clone --depth 1 https://github.com/fifthQuark/nextcloud-opds /tmp/nextcloud-opds
       - name: Install in Nextcloud and run e2e suites
         env:
           DOCKER: docker
           DB: ${{ matrix.db }}
           CROSSPOINT_DIR: /tmp/crosspoint-sync
+          OPDS_DIR: /tmp/nextcloud-opds
         run: dev/test-matrix.sh abscompat/build/abscompat-*.tar.gz ${{ matrix.nextcloud }}
       - uses: actions/upload-artifact@v4
         if: matrix.nextcloud == '34' && matrix.db == 'sqlite'

@@ -101,6 +101,16 @@ test('names', () => {
 	assert.deepEqual(T.fromNames([], 'Ann Lee - The_Title'), { author: 'Ann Lee', title: 'The Title' })
 	assert.deepEqual(T.fromNames([], '1984'), { title: '1984' })
 })
+test('series tags are read like on the server', async () => {
+	const meta = async (f) => {
+		const [b] = await T.group([e('Ann/X/' + f, fixture(f))])
+		return [b.meta.series, b.meta.seriesSeq]
+	}
+	assert.deepEqual(await meta('series-text.mp3'), ['Saga é', '3'])
+	assert.deepEqual(await meta('series-movement.mp3'), ['Saga é', '4'])
+	assert.deepEqual(await meta('series-grouping.mp3'), ['Saga', '2.5'])
+	assert.deepEqual(await meta('series.m4b'), ['Saga', '6'])
+})
 test('grouping: folders, discs, loose files, extras', async () => {
 	let g = await T.group([
 		e('Ann/Saga/1 - One/02.mp3'), e('Ann/Saga/1 - One/01.mp3'), e('Ann/Saga/1 - One/cover.jpg'), e('Ann/Saga/1 - One/one.epub'),

@@ -27,6 +27,36 @@
 		<span id="abscompat-scan-status" class="abscompat-status" role="status"></span>
 	</div>
 
+	<h3><?php p($l->t('Streaming')); ?></h3>
+	<p class="settings-hint"><?php p($l->t('Off by default: apps download a book once and play it from the device. With streaming on, the Audiobookshelf app can also play books that are not downloaded.')); ?></p>
+	<div class="abscompat-warning">
+		<p><strong><?php p($l->t('Before you turn it on:')); ?></strong></p>
+		<ul>
+			<li><?php p($l->t('Bandwidth: every listen sends the audio from this server again, about 30 to 60 MB per hour, up to 150 MB for high quality files, and it counts as mobile data on the phone.')); ?></li>
+			<li><?php p($l->t('Server load: while a book plays, it can keep one of the server\'s processes busy for a long time. On small or shared hosting, Nextcloud may become slow or stop answering for everyone.')); ?></li>
+			<li><?php p($l->t('Your hosting provider: some limit traffic or long downloads, or do not allow media streaming in their terms. They may slow down, charge for or suspend an account. Check this first.')); ?></li>
+		</ul>
+	</div>
+	<p id="abscompat-streaming-forbidden" class="settings-hint" hidden><?php p($l->t('The administrator of this Nextcloud does not allow streaming.')); ?></p>
+	<p id="abscompat-streaming-row">
+		<input type="checkbox" id="abscompat-streaming" class="checkbox">
+		<label for="abscompat-streaming"><?php p($l->t('Allow my apps to stream')); ?></label>
+	</p>
+	<p class="settings-hint"><?php p($l->t('Voice uses the same address for downloading and streaming, so this switch does not stop it from streaming. Use its downloads instead.')); ?></p>
+
+	<div id="abscompat-opds" hidden>
+		<h3><?php p($l->t('Ebooks from OPDS+')); ?></h3>
+		<p class="settings-hint"><?php p($l->t('OPDS+ is installed. Its book list is only read here; nothing in OPDS+ is changed.')); ?></p>
+		<p>
+			<input type="checkbox" id="abscompat-opds-links" class="checkbox">
+			<label for="abscompat-opds-links"><?php p($l->t('Add the matching ebook to audiobooks that have none (same title and author)')); ?></label>
+		</p>
+		<p>
+			<input type="checkbox" id="abscompat-opds-library" class="checkbox">
+			<label for="abscompat-opds-library"><?php p($l->t('Show the other ebooks as a library of their own')); ?></label>
+		</p>
+	</div>
+
 	<h3><?php p($l->t('API keys')); ?></h3>
 	<p class="settings-hint"><?php p($l->t('For services that use a key instead of logging in, such as CrossPoint Sync. A key gives access to your audiobooks and listening progress, not to your other files.')); ?></p>
 	<form id="abscompat-key-form" class="abscompat-row">

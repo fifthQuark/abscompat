@@ -6,6 +6,7 @@ namespace OCA\AbsCompat\Controller;
 
 use OCA\AbsCompat\Service\BookmarkService;
 use OCA\AbsCompat\Service\Catalog;
+use OCA\AbsCompat\Service\HiddenSeries;
 use OCA\AbsCompat\Service\SessionService;
 use OCA\AbsCompat\Service\LibraryService;
 use OCA\AbsCompat\Service\ProgressService;
@@ -29,6 +30,7 @@ class MeController extends AbsBaseController {
 		private Catalog $catalog,
 		private BookmarkService $bookmarks,
 		private SessionService $sessions,
+		private HiddenSeries $hiddenSeries,
 	) {
 		parent::__construct($request, $tokens, $library);
 	}
@@ -42,7 +44,81 @@ class MeController extends AbsBaseController {
 		if ($user === null) {
 			return $this->unauthorized();
 		}
-		return new JSONResponse(Serializer::user($uid, $user->getDisplayName(), $user->getEMailAddress(), $this->progress->allForUser($uid), $this->bookmarks->allForUser($uid)));
+		return new JSONResponse(Serializer::user($uid, $user->getDisplayName(), $user->getEMailAddress(), $this->progress->allForUser($uid), $this->bookmarks->allForUser($uid), $this->hiddenSeries->get($uid)));
+	}
+
+	#[PublicPage]
+	#[NoCSRFRequired]
+	#[FrontpageRoute(verb: 'GET', url: '/api/me/progress')]
+	public function allProgress(): JSONResponse {
+		$uid = $this->currentUser();
+		return $uid === null ? $this->unauthorized()
+			: new JSONResponse(['mediaProgress' => array_values(array_map(static fn ($r) => ProgressService::toJson($r, $uid), $this->progress->allForUser($uid)))]);
+	}
+
+	#[PublicPage]
+	#[NoCSRFRequired]
+	#[FrontpageRoute(verb: 'GET', url: '/api/me/bookmarks')]
+	public function allBookmarks(): JSONResponse {
+		$uid = $this->currentUser();
+		return $uid === null ? $this->unauthorized() : new JSONResponse(['bookmarks' => $this->bookmarks->allForUser($uid)]);
+	}
+
+	#[PublicPage]
+	#[NoCSRFRequired]
+	#[FrontpageRoute(verb: 'GET', url: '/api/me/stats/year/{year}')]
+	public function yearStats(string $year): JSONResponse {
+		$uid = $this->currentUser();
+		if ($uid === null) {
+			return $this->unauthorized();
+		}
+		if (!preg_match('/^(?:20|19)\d\d$/', $year)) {
+			return new JSONResponse(['error' => 'Invalid year'], Http::STATUS_BAD_REQUEST);
+		}
+		return new JSONResponse($this->sessions->yearStats($uid, (int)$year));
+	}
+
+	#[PublicPage]
+	#[NoCSRFRequired]
+	#[FrontpageRoute(verb: 'GET', url: '/api/me/progress/{id}/remove-from-continue-listening')]
+	public function hideItem(string $id): JSONResponse {
+		$uid = $this->currentUser();
+		if ($uid === null) {
+			return $this->unauthorized();
+		}
+		$key = str_starts_with($id, 'mp_') ? substr($id, 3) : $id;
+		$p = $this->progress->get($uid, $key);
+		if ($p === null) {
+			return $this->notFound('Progress not found');
+		}
+		$this->progress->apply($uid, $key, ['hideFromContinueListening' => true, 'lastUpdate' => (int)$p['last_update']], (float)$p['duration']);
+		return $this->me();
+	}
+
+	#[PublicPage]
+	#[NoCSRFRequired]
+	#[FrontpageRoute(verb: 'GET', url: '/api/me/series/{id}/remove-from-continue-listening')]
+	public function hideSeries(string $id): JSONResponse {
+		return $this->setSeriesHidden($id, true);
+	}
+
+	#[PublicPage]
+	#[NoCSRFRequired]
+	#[FrontpageRoute(verb: 'GET', url: '/api/me/series/{id}/readd-to-continue-listening')]
+	public function showSeries(string $id): JSONResponse {
+		return $this->setSeriesHidden($id, false);
+	}
+
+	private function setSeriesHidden(string $id, bool $hidden): JSONResponse {
+		$uid = $this->currentUser();
+		if ($uid === null) {
+			return $this->unauthorized();
+		}
+		if ($this->catalog->findInLibraries($uid, $id, true) === null) {
+			return $this->notFound('Series not found');
+		}
+		$this->hiddenSeries->set($uid, $id, $hidden);
+		return $this->me();
 	}
 
 	#[PublicPage]

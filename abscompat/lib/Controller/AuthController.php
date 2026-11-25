@@ -6,6 +6,7 @@ namespace OCA\AbsCompat\Controller;
 
 use OCA\AbsCompat\AppInfo\Application;
 use OCA\AbsCompat\Service\BookmarkService;
+use OCA\AbsCompat\Service\HiddenSeries;
 use OCA\AbsCompat\Service\LibraryService;
 use OCA\AbsCompat\Service\ProgressService;
 use OCA\AbsCompat\Service\Serializer;
@@ -36,6 +37,7 @@ class AuthController extends AbsBaseController {
 		private IProvider $tokenProvider,
 		private IRegistry $twoFactorRegistry,
 		private BookmarkService $bookmarks,
+		private HiddenSeries $hiddenSeries,
 	) {
 		parent::__construct($request, $tokens, $library);
 	}
@@ -77,7 +79,7 @@ class AuthController extends AbsBaseController {
 		$uid = $user->getUID();
 		$libs = $this->library->getLibraries($uid);
 		return [
-			'user' => Serializer::user($uid, $user->getDisplayName(), $user->getEMailAddress(), $this->progress->allForUser($uid), $this->bookmarks->allForUser($uid)),
+			'user' => Serializer::user($uid, $user->getDisplayName(), $user->getEMailAddress(), $this->progress->allForUser($uid), $this->bookmarks->allForUser($uid), $this->hiddenSeries->get($uid)),
 			'userDefaultLibraryId' => $libs[0]['id'] ?? null,
 			'serverSettings' => Serializer::serverSettings($this->language()),
 			'ereaderDevices' => [],

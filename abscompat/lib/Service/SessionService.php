@@ -112,6 +112,31 @@ class SessionService {
 		return $row ?: null;
 	}
 
+	/** A session that is being played, whoever it belongs to. */
+	public function open(string $sid): ?array {
+		if (!preg_match('/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/D', $sid)) {
+			return null;
+		}
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('*')->from(self::TABLE)
+			->where($qb->expr()->eq('session_id', $qb->createNamedParameter($sid)))
+			->andWhere($qb->expr()->eq('play_method', $qb->createNamedParameter(0, IQueryBuilder::PARAM_INT)))
+			->andWhere($qb->expr()->eq('closed', $qb->createNamedParameter(0, IQueryBuilder::PARAM_INT)))
+			// ABS drops sessions that were not heard of for 36 hours.
+			->andWhere($qb->expr()->gt('updated_at', $qb->createNamedParameter(self::nowMs() - 36 * 3600 * 1000, IQueryBuilder::PARAM_INT)));
+		$res = $qb->executeQuery();
+		$rows = $res->fetchAll();
+		$res->closeCursor();
+		return count($rows) === 1 ? $rows[0] : null;
+	}
+
+	/** GET /api/session/:id */
+	public function getJson(string $userId, string $sid): ?array {
+		$s = $this->getSession($userId, $sid);
+		$cache = [];
+		return $s === null ? null : $this->sessionJson($userId, $s, $cache);
+	}
+
 	/**
 	 * POST /api/session/:id/sync and /close. Body: currentTime, timeListened, duration.
 	 * Returns false when the session is unknown.
@@ -321,6 +346,92 @@ class SessionService {
 			'dayOfWeek' => (object)$dow,
 			'today' => $today,
 			'recentSessions' => $recent,
+		];
+	}
+
+	/** GET /api/me/stats/year/:year */
+	public function yearStats(string $userId, int $year): array {
+		$from = mktime(0, 0, 0, 1, 1, $year) * 1000;
+		$to = mktime(0, 0, 0, 1, 1, $year + 1) * 1000;
+		$items = [];
+		$item = function (string $key) use ($userId, &$items): ?array {
+			if (!array_key_exists($key, $items)) {
+				$items[$key] = $this->catalog->item($userId, $key);
+			}
+			return $items[$key];
+		};
+		$finished = [];
+		$withCover = [];
+		$longest = null;
+		foreach ($this->progress->allForUser($userId) as $key => $p) {
+			if (!$p['is_finished'] || (int)$p['finished_at'] < $from || (int)$p['finished_at'] >= $to) {
+				continue;
+			}
+			$finished[] = (string)$key;
+			$r = $item((string)$key);
+			if ($r !== null && Serializer::hasCover($r) && count($withCover) < 5) {
+				$withCover[] = (string)$key;
+			}
+			if ($r !== null && (float)$p['duration'] > ($longest['duration'] ?? 0)) {
+				$longest = ['id' => 'b' . $key, 'title' => (string)$r['title'], 'duration' => (int)round((float)$p['duration']), 'finishedAt' => (int)$p['finished_at']];
+			}
+		}
+		$total = 0.0;
+		$sessions = 0;
+		$sums = ['authors' => [], 'narrators' => [], 'genres' => [], 'books' => [], 'months' => []];
+		$covers = [];
+		foreach ($this->sessionRows($userId) as $s) {
+			$at = (int)$s['started_at'];
+			if ($at < $from || $at >= $to) {
+				continue;
+			}
+			$sessions++;
+			$t = (float)$s['time_listening'];
+			$total += $t;
+			$key = (string)$s['item_key'];
+			$month = (int)date('n', intdiv($at, 1000)) - 1;
+			$sums['months'][$month] = ($sums['months'][$month] ?? 0) + $t;
+			$sums['books'][$key] = true;
+			$r = $item($key);
+			if ($r === null) {
+				continue;
+			}
+			if (Serializer::hasCover($r) && count($covers) < 25 && !in_array($key, $withCover, true)) {
+				$covers[$key] = true;
+			}
+			foreach (['authors', 'narrators', 'genres'] as $group) {
+				foreach (Catalog::terms($r, $group) as $name) {
+					if ($group !== 'genres' || !preg_match('/audio ?book/i', (string)$name)) {
+						$sums[$group][$name] = ($sums[$group][$name] ?? 0) + $t;
+					}
+				}
+			}
+		}
+		$top = static function (array $sums, string $label): array {
+			arsort($sums);
+			$out = [];
+			foreach (array_slice($sums, 0, 3, true) as $name => $t) {
+				$out[] = [$label => (string)$name, 'time' => (int)round($t)];
+			}
+			return $out;
+		};
+		arsort($sums['months']);
+		$month = array_key_first($sums['months']);
+		$total = (int)round($total);
+		return [
+			'totalListeningSessions' => $sessions,
+			'totalListeningTime' => $total,
+			'totalBookListeningTime' => $total,
+			'totalPodcastListeningTime' => 0,
+			'topAuthors' => $top($sums['authors'], 'name'),
+			'topGenres' => $top($sums['genres'], 'genre'),
+			'mostListenedNarrator' => $top($sums['narrators'], 'name')[0] ?? null,
+			'mostListenedMonth' => $month === null ? null : ['month' => $month, 'time' => (int)round($sums['months'][$month])],
+			'numBooksFinished' => count($finished),
+			'numBooksListened' => count($sums['books']),
+			'longestAudiobookFinished' => $longest,
+			'booksWithCovers' => array_map('strval', array_keys($covers)),
+			'finishedBooksWithCovers' => $withCover,
 		];
 	}
 

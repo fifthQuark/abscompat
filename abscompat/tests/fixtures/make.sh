@@ -27,5 +27,6 @@ ffmpeg $q -f lavfi -i "sine=frequency=440:duration=10" -i /tmp/abs-ch.txt -map 0
 ffmpeg $q -f lavfi -i "sine=frequency=440:duration=10" -i /tmp/abs-ch.txt -map 0:a -map_metadata 1 -map_chapters 1 -c:a libmp3lame -b:a 16k -id3v2_version 3 chapters.mp3
 ffmpeg $q -f lavfi -i "sine=frequency=440:duration=6" -c:a libmp3lame -b:a 16k -metadata title="Plain" -metadata track="2" -id3v2_version 3 plain.mp3
 python3 make-malformed.py plain.mp3 malformed.mp3
+python3 make-series.py plain.mp3 chapters.m4b
 rm -f /tmp/abs-ch.txt
 ls -l

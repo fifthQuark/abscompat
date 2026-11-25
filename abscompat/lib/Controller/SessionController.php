@@ -63,6 +63,18 @@ class SessionController extends AbsBaseController {
 
 	#[PublicPage]
 	#[NoCSRFRequired]
+	#[FrontpageRoute(verb: 'GET', url: '/api/session/{id}')]
+	public function get(string $id): Response {
+		$uid = $this->currentUser();
+		if ($uid === null) {
+			return $this->unauthorized();
+		}
+		$json = $this->sessions->getJson($uid, $id);
+		return $json === null ? $this->notFound('Session not found') : new JSONResponse($json);
+	}
+
+	#[PublicPage]
+	#[NoCSRFRequired]
 	#[FrontpageRoute(verb: 'POST', url: '/api/session/{id}/sync')]
 	public function sync(string $id): Response {
 		$uid = $this->currentUser();

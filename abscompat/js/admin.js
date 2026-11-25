@@ -20,7 +20,20 @@
 	document.addEventListener('DOMContentLoaded', () => {
 		const area = document.getElementById('abscompat-default-folders')
 		const status = document.getElementById('abscompat-admin-status')
-		call('GET').then((d) => { area.value = d.defaultFolders.join('\n') }).catch((e) => { status.textContent = e.message })
+		const streaming = document.getElementById('abscompat-allow-streaming')
+		call('GET').then((d) => {
+			area.value = d.defaultFolders.join('\n')
+			streaming.checked = d.allowStreaming
+		}).catch((e) => { status.textContent = e.message })
+		streaming.addEventListener('change', async () => {
+			try {
+				streaming.checked = (await call('PUT', { allowStreaming: streaming.checked })).allowStreaming
+				status.textContent = t('Saved')
+			} catch (e) {
+				streaming.checked = !streaming.checked
+				status.textContent = e.message
+			}
+		})
 		document.getElementById('abscompat-save-defaults').addEventListener('click', async () => {
 			try {
 				const d = await call('PUT', { defaultFolders: area.value.split('\n').map((s) => s.trim()).filter(Boolean) })

@@ -55,6 +55,19 @@ await check('non-admin cannot change the admin default', async () => {
   const r = await call(PLAIN, 'PUT', '/settings/admin', { defaultFolders: ['/x'] })
   assert.ok(r.status === 403 || r.status === 401, String(r.status))
 })
+await check('streaming is off by default and per user; OPDS+ options are off limits without OPDS+', async () => {
+  let r = await call(PLAIN, 'GET', '/settings')
+  assert.deepEqual(r.json.streaming, { allowed: true, on: false })
+  r = await call(PLAIN, 'PUT', '/settings/streaming', { enabled: true })
+  assert.equal(r.json.streaming.on, true)
+  assert.equal((await call(ADMIN, 'GET', '/settings')).json.streaming.on, false)
+  assert.equal((await call(PLAIN, 'PUT', '/settings/streaming', { enabled: false })).json.streaming.on, false)
+  if (!r.json.opds.available) {
+    r = await call(PLAIN, 'PUT', '/settings/opds', { links: true, library: true })
+    assert.deepEqual(r.json.opds, { available: false, links: false, library: false })
+    await call(PLAIN, 'PUT', '/settings/opds', { links: true, library: false })
+  }
+})
 await check('sign out all devices revokes logins but keeps API keys', async () => {
   const login = await fetch(base + '/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: env.NC_PLAIN_USER, password: env.NC_PLAIN_PASSWORD }) })
   const access = (await login.json()).user.accessToken

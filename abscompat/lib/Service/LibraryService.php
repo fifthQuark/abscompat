@@ -26,12 +26,21 @@ use Psr\Log\LoggerInterface;
  */
 class LibraryService {
 	public const AUDIO_EXT = ['m4b', 'mp3', 'm4a', 'ogg', 'oga', 'opus', 'flac', 'aac', 'wav', 'wma', 'mp4'];
-	public const EBOOK_EXT = ['epub'];
+	/** What Audiobookshelf's readers open, best first. */
+	public const EBOOK_EXT = ['epub', 'azw3', 'mobi', 'pdf', 'cbz', 'cbr'];
 	public const COVER_NAMES = ['cover.jpg', 'cover.jpeg', 'cover.png', 'cover.webp', 'folder.jpg', 'folder.png'];
 	/** File name prefix of covers the user chose or that were looked up (others are embedded art). */
 	public const CUSTOM_COVER = 'own-';
-	/** Metadata the user can override => column */
-	private const EDITABLE = ['title' => 'title', 'author' => 'author', 'series' => 'series', 'seriesSeq' => 'series_seq', 'narrator' => 'narrator'];
+	/** Details the user can change => column and length, or only length when they are kept in "extra" */
+	private const EDITABLE = [
+		'title' => ['title', 512], 'subtitle' => ['subtitle', 512], 'author' => ['author', 512], 'narrator' => ['narrator', 512],
+		'series' => ['series', 512], 'seriesSeq' => ['series_seq', 32], 'year' => ['published_year', 16], 'description' => ['description', 20000],
+		'publisher' => [null, 255], 'language' => [null, 64], 'isbn' => [null, 32], 'asin' => [null, 32],
+	];
+	private const EDITABLE_LISTS = ['genres', 'tags'];
+	private const EDITABLE_FLAGS = ['explicit', 'abridged'];
+	/** Columns that decide whether a scanned book has changed */
+	private const COMPARED = ['library_id', 'is_file', 'rel_path', 'title', 'subtitle', 'author', 'narrator', 'series', 'series_seq', 'published_year', 'description', 'genres', 'size', 'chapters', 'cover_file_id', 'ebook_file_id', 'extra'];
 	public const DEFAULT_FOLDERS = ['/Audiobooks'];
 	private const MIME = [
 		'm4b' => 'audio/mp4', 'm4a' => 'audio/mp4', 'mp4' => 'audio/mp4', 'aac' => 'audio/aac',
@@ -47,8 +56,13 @@ class LibraryService {
 		private MetadataExtractor $extractor,
 		private LoggerInterface $logger,
 		private IAppConfig $appConfig,
+		private EbookReader $ebooks,
+		private OpdsLink $opds,
 	) {
 	}
+
+	/** @var array<string, array>|null overrides of the user being scanned */
+	private ?array $scanOverrides = null;
 
 	// ----- settings -----
 
@@ -133,6 +147,9 @@ class LibraryService {
 				$out[] = ['id' => (string)$node->getId(), 'name' => $name, 'path' => $path, 'folder' => $node];
 			}
 		}
+		if ($this->opds->hasLibrary($userId)) {
+			$out[] = ['id' => OpdsLink::LIBRARY, 'name' => 'Ebooks', 'path' => '/', 'folder' => $userFolder];
+		}
 		return $out;
 	}
 
@@ -153,8 +170,13 @@ class LibraryService {
 		$stats = ['items' => 0, 'scanned' => 0, 'removed' => 0];
 		$seen = [];
 		$libIds = [];
+		$this->scanOverrides = $this->allOverrides($userId);
 		foreach ($this->getLibraries($userId) as $lib) {
 			$libIds[] = $lib['id'];
+			if ($lib['id'] === OpdsLink::LIBRARY) {
+				$stats['items'] += $this->scanOpds($userId, $seen);
+				continue;
+			}
 			$books = [];
 			$this->findBooks($lib['folder'], 0, $books);
 			foreach ($books as $book) {
@@ -165,7 +187,7 @@ class LibraryService {
 				// Present on disk, so never "missing", even when reading it fails below.
 				$seen[(string)$book['node']->getId()] = true;
 				try {
-					$key = $this->scanBook($userId, $lib, $book['node'], $book['audio'], $book['dir']);
+					$key = $this->scanBook($userId, $lib, $book);
 					if ($key !== null) {
 						$stats['items']++;
 					}
@@ -198,7 +220,7 @@ class LibraryService {
 			}
 			foreach ($books as $book) {
 				if ($book['node']->getId() === $node->getId()) {
-					return $this->scanBook($userId, $lib, $node, $book['audio'], $book['dir']);
+					return $this->scanBook($userId, $lib, $book);
 				}
 			}
 		}
@@ -207,36 +229,71 @@ class LibraryService {
 
 	/**
 	 * Book = folder that directly holds audio files (its audio files in sub-folders, e.g. CD1/CD2,
-	 * belong to it), or an audio file in the library root.
+	 * belong to it), or an audio file in the library root. Ebooks belong to the audio in their folder;
+	 * where there is none they are books of their own: the folder if it holds one title, else each title.
 	 *
-	 * @param list<array{node: Node, audio: list<File>, dir: Folder}> $books
+	 * @param list<array{node: Node, audio: list<File>, ebooks: list<File>, dir: Folder}> $books
 	 */
 	private function findBooks(Folder $dir, int $depth, array &$books): void {
 		$audio = [];
 		$subdirs = [];
+		$titles = [];
 		foreach ($dir->getDirectoryListing() as $child) {
 			if ($child instanceof Folder) {
 				$subdirs[] = $child;
 			} elseif ($child instanceof File && self::isAudio($child->getName())) {
 				$audio[] = $child;
+			} elseif ($child instanceof File && self::isEbook($child->getName())) {
+				$titles[mb_strtolower(pathinfo($child->getName(), PATHINFO_FILENAME))][] = $child;
 			}
 		}
 		if ($depth === 0) {
 			foreach ($audio as $f) {
-				$books[] = ['node' => $f, 'audio' => [$f], 'dir' => $dir];
+				$stem = mb_strtolower(pathinfo($f->getName(), PATHINFO_FILENAME));
+				$books[] = ['node' => $f, 'audio' => [$f], 'ebooks' => $titles[$stem] ?? [], 'dir' => $dir];
+				unset($titles[$stem]);
 			}
 		} elseif ($audio !== []) {
 			foreach ($subdirs as $sd) {
 				$this->collectAudio($sd, $audio);
 			}
-			$books[] = ['node' => $dir, 'audio' => $audio, 'dir' => $dir];
+			$books[] = ['node' => $dir, 'audio' => $audio, 'ebooks' => array_merge([], ...array_values($titles)), 'dir' => $dir];
 			return;
 		}
+		$before = count($books);
 		if ($depth < 6) {
 			foreach ($subdirs as $sd) {
 				$this->findBooks($sd, $depth + 1, $books);
 			}
 		}
+		$inner = count($books) > $before;
+		if ($depth > 0 && !$inner && count($titles) === 1) {
+			$books[] = ['node' => $dir, 'audio' => [], 'ebooks' => reset($titles), 'dir' => $dir];
+			return;
+		}
+		foreach ($titles as $files) {
+			usort($files, static fn ($a, $b) => self::ebookRank($a->getName()) <=> self::ebookRank($b->getName()));
+			// Next to other books, a lone PDF or comic is rather a map or booklet than a book.
+			if ($depth > 0 && $inner && self::ebookRank($files[0]->getName()) > 2) {
+				continue;
+			}
+			$books[] = ['node' => $files[0], 'audio' => [], 'ebooks' => $files, 'dir' => $dir];
+		}
+	}
+
+	public static function isEbook(string $name): bool {
+		return self::ebookRank($name) < count(self::EBOOK_EXT);
+	}
+
+	private static function ebookRank(string $name): int {
+		$i = array_search(strtolower(pathinfo($name, PATHINFO_EXTENSION)), self::EBOOK_EXT, true);
+		return $i === false ? count(self::EBOOK_EXT) : $i;
+	}
+
+	/** @param list<array> $files with "name" @return list<array> the best format first */
+	public static function sortEbooks(array $files): array {
+		usort($files, static fn ($a, $b) => self::ebookRank($a['name']) <=> self::ebookRank($b['name']) ?: strnatcasecmp($a['name'], $b['name']));
+		return $files;
 	}
 
 	/** @param list<File> $audio */
@@ -258,8 +315,9 @@ class LibraryService {
 		return self::MIME[strtolower(pathinfo($name, PATHINFO_EXTENSION))] ?? 'application/octet-stream';
 	}
 
-	/** @param list<File> $audio */
-	private function scanBook(string $userId, array $lib, Node $node, array $audio, Folder $dir): ?string {
+	/** @param array{node: Node, audio: list<File>, ebooks: list<File>, dir: Folder} $book from findBooks() */
+	private function scanBook(string $userId, array $lib, array $book): ?string {
+		['node' => $node, 'audio' => $audio, 'dir' => $dir] = $book;
 		$key = (string)$node->getId();
 		$isFile = $node instanceof File;
 		$libRoot = rtrim($lib['folder']->getPath(), '/');
@@ -333,60 +391,111 @@ class LibraryService {
 			return strnatcasecmp($a['relPath'], $b['relPath']);
 		});
 
-		// Folder-side files: cover and ebook.
+		// Read again by a newer version of this app: the first file is enough, it has the book's tags.
+		$known = $tracks[0]['meta'] ?? ['v' => MetadataExtractor::VERSION];
+		if (!$changed && (int)($known['v'] ?? 1) < MetadataExtractor::VERSION) {
+			$fresh = $this->extractor->extract($tracks[0]['file'], false);
+			// A file that can't be read right now keeps what is known about it.
+			if (isset($fresh['v'])) {
+				unset($fresh['picture']);
+				if ($fresh['duration'] <= 0 && $known['duration'] > 0) {
+					$fresh = ['v' => $fresh['v']] + $known;
+				}
+				$tracks[0]['meta'] = $fresh;
+				$changed = true;
+			}
+		}
+
+		// Folder-side files: ebooks and cover.
+		$own = self::sortEbooks(array_map(static fn (File $f) => [
+			'id' => (int)$f->getId(), 'name' => $f->getName(), 'path' => ltrim(substr($f->getPath(), strlen($libRoot)), '/'),
+			'size' => (int)$f->getSize(), 'mtime' => (int)$f->getMTime(),
+		], $book['ebooks']));
+		$ebookOnly = $tracks === [];
 		$coverFileId = null;
-		$ebookFileId = null;
 		if (!$isFile) {
-			foreach ($dir->getDirectoryListing() as $child) {
-				if (!$child instanceof File) {
-					continue;
-				}
-				$lower = strtolower($child->getName());
-				if ($coverFileId === null && in_array($lower, self::COVER_NAMES, true)) {
+			$listing = $dir->getDirectoryListing();
+			foreach ($listing as $child) {
+				if ($coverFileId === null && $child instanceof File && in_array(strtolower($child->getName()), self::COVER_NAMES, true)) {
 					$coverFileId = (int)$child->getId();
-				} elseif ($ebookFileId === null && in_array(pathinfo($lower, PATHINFO_EXTENSION), self::EBOOK_EXT, true)) {
-					$ebookFileId = (int)$child->getId();
 				}
 			}
-			if ($coverFileId === null) {
-				foreach ($dir->getDirectoryListing() as $child) {
-					if ($child instanceof File && preg_match('/\.(jpe?g|png|webp)$/i', $child->getName())) {
-						$coverFileId = (int)$child->getId();
-						break;
-					}
+			foreach ($listing as $child) {
+				if ($coverFileId === null && $child instanceof File && preg_match('/\.(jpe?g|png|webp)$/i', $child->getName())) {
+					$coverFileId = (int)$child->getId();
 				}
 			}
-		}
-		if ((int)($existing['cover_file_id'] ?? 0) !== (int)$coverFileId || (int)($existing['ebook_file_id'] ?? 0) !== (int)$ebookFileId) {
-			$changed = true;
-		}
-		if (!$changed && $existing !== null) {
-			return $key;
 		}
 
 		// Book-level metadata.
-		$first = $tracks[0]['meta']['tags'] ?? [];
+		$before = $existing === null ? [] : Serializer::extra($existing);
+		$extra = [];
+		if ($ebookOnly) {
+			$sig = implode('-', [$own[0]['id'], $own[0]['mtime'], $own[0]['size']]);
+			if (($before['sig'] ?? '') === $sig) {
+				$first = $before['fileTags'] ?? [];
+			} else {
+				foreach ($book['ebooks'] as $f) {
+					if ((int)$f->getId() === $own[0]['id']) {
+						['tags' => $first, 'picture' => $firstPicture] = $this->ebooks->read($f);
+					}
+				}
+			}
+			$extra += ['ebookOnly' => true, 'sig' => $sig, 'fileTags' => $first ?? []];
+			$first = $extra['fileTags'];
+		} else {
+			$first = $tracks[0]['meta']['tags'] ?? [];
+		}
 		$parts = $relPath === '' ? [] : explode('/', $isFile ? preg_replace('/\.[^.\/]+$/', '', $relPath) : $relPath);
 		$folderTitle = $parts !== [] ? end($parts) : $node->getName();
 		$folderAuthor = count($parts) >= 2 ? $parts[0] : null;
 		$folderSeries = count($parts) >= 3 ? $parts[count($parts) - 2] : null;
 		$seriesSeq = null;
-		if ($folderSeries !== null && preg_match('/^(?:(?:book|vol(?:ume)?)\.?\s*)?(\d+(?:\.\d+)?)\s*[-.–:]\s*(.+)$/iu', $folderTitle, $m)) {
-			$seriesSeq = $m[1];
-			$folderTitle = $m[2];
+		if ($folderSeries !== null) {
+			['title' => $folderTitle, 'seq' => $seriesSeq] = SeriesParser::fromFolder($folderTitle);
 		}
 		$multi = count($tracks) > 1;
-		$title = $first['album'] ?? (!$multi ? ($first['title'] ?? null) : null) ?? $folderTitle;
-		$author = $first['albumArtist'] ?? $first['artist'] ?? $folderAuthor;
-		$series = $first['series'] ?? $folderSeries;
-		$seriesSeq = $first['seriesPart'] ?? $seriesSeq;
-		$narrator = $first['composer'] ?? null;
-		// Edits made from a client (PATCH /api/items/:id/media) or the upload form win over file metadata.
-		$ov = $this->getOverrides($userId, $key);
-		foreach (array_keys(self::EDITABLE) as $k) {
-			if (array_key_exists($k, $ov)) {
-				$$k = $ov[$k];
+		$allSeries = SeriesParser::allFromTags($first);
+		$tagged = array_shift($allSeries);
+		$values = [
+			'user_id' => $userId,
+			'library_id' => $lib['id'],
+			'item_key' => $key,
+			'is_file' => $isFile ? 1 : 0,
+			'rel_path' => $relPath,
+			'title' => $first['album'] ?? (!$multi ? ($first['title'] ?? null) : null) ?? $folderTitle,
+			'subtitle' => $first['subtitle'] ?? null,
+			'author' => $first['albumArtist'] ?? $first['artist'] ?? $folderAuthor,
+			'narrator' => $first['composer'] ?? null,
+			'series' => $tagged['name'] ?? $folderSeries,
+			'series_seq' => $tagged['seq'] ?? $seriesSeq,
+			'published_year' => isset($first['year']) ? preg_replace('/^(\d{4}).*/', '$1', $first['year']) : null,
+			'description' => $first['description'] ?? null,
+			'genres' => isset($first['genre']) ? array_values(array_filter(array_map('trim', preg_split('/[;\/]/', $first['genre'])))) : [],
+		];
+		foreach (['publisher', 'language', 'isbn', 'asin'] as $k) {
+			if (isset($first[$k])) {
+				$extra[$k] = $first[$k];
 			}
+		}
+		if ($allSeries !== []) {
+			$extra['series'] = $allSeries;
+		}
+		// Edits made from a client (PATCH /api/items/:id/media), the page or the upload form win over the files.
+		$ov = $this->scanOverrides !== null ? ($this->scanOverrides[$key] ?? []) : $this->getOverrides($userId, $key);
+		[$values, $extra] = self::applyEdits($values, $extra, $ov);
+		$title = (string)$values['title'];
+
+		// Without an ebook of its own, an audiobook gets the matching one from OPDS+.
+		if ($own === [] && !$ebookOnly) {
+			$own = $this->opdsEbooks($userId, $title, $values['author'], $ov, $before['ebooks'] ?? []);
+		}
+		if ($own !== []) {
+			$extra['ebooks'] = $own;
+		}
+		$ebookFileId = $own[0]['id'] ?? null;
+		if (array_key_exists('ebook', $ov) && ($ov['ebook'] === 0 || in_array($ov['ebook'], array_column($own, 'id'), true))) {
+			$ebookFileId = $ov['ebook'] ?: null;
 		}
 
 		// Durations, offsets, chapters.
@@ -412,33 +521,25 @@ class LibraryService {
 		}
 		unset($c);
 		$size = array_sum(array_column($tracks, 'size'));
+		if ($ebookOnly) {
+			$size = array_sum(array_column($own, 'size'));
+		}
 		$now = (int)(microtime(true) * 1000);
+		$values = self::toColumns($values, $extra) + [
+			'duration' => $duration,
+			'size' => $size,
+			'chapters' => json_encode($chapters, JSON_INVALID_UTF8_SUBSTITUTE),
+			'cover_file_id' => $coverFileId,
+			'ebook_file_id' => $ebookFileId,
+			'updated_at' => $now,
+			'mtime' => (int)$node->getMTime(),
+		];
+		if (!$changed && !self::differs($existing, $values)) {
+			return $key;
+		}
 
 		$this->db->beginTransaction();
 		try {
-			$values = [
-				'user_id' => $userId,
-				'library_id' => $lib['id'],
-				'item_key' => $key,
-				'is_file' => $isFile ? 1 : 0,
-				'rel_path' => $relPath,
-				'title' => mb_substr((string)$title, 0, 512),
-				'subtitle' => isset($first['subtitle']) ? mb_substr($first['subtitle'], 0, 512) : null,
-				'author' => $author !== null ? mb_substr($author, 0, 512) : null,
-				'narrator' => $narrator !== null ? mb_substr($narrator, 0, 512) : null,
-				'series' => $series !== null ? mb_substr($series, 0, 512) : null,
-				'series_seq' => $seriesSeq !== null ? mb_substr($seriesSeq, 0, 32) : null,
-				'published_year' => isset($first['year']) ? mb_substr(preg_replace('/^(\d{4}).*/', '$1', $first['year']), 0, 16) : null,
-				'description' => $first['description'] ?? null,
-				'genres' => json_encode(isset($first['genre']) ? array_values(array_filter(array_map('trim', preg_split('/[;\/]/', $first['genre'])))) : []),
-				'duration' => $duration,
-				'size' => $size,
-				'chapters' => json_encode($chapters, JSON_INVALID_UTF8_SUBSTITUTE),
-				'cover_file_id' => $coverFileId,
-				'ebook_file_id' => $ebookFileId,
-				'updated_at' => $now,
-				'mtime' => (int)$node->getMTime(),
-			];
 			if ($existing === null) {
 				$values['added_at'] = $now;
 				if (isset($ov['cover'])) {
@@ -495,6 +596,242 @@ class LibraryService {
 			$this->storeEmbeddedCover($userId, $key, $firstPicture);
 		}
 		return $key;
+	}
+
+	/** The stored form: lengths cut, lists as JSON. */
+	private static function toColumns(array $values, array $extra): array {
+		foreach (self::EDITABLE as [$col, $max]) {
+			if ($col !== null && isset($values[$col])) {
+				$values[$col] = mb_substr((string)$values[$col], 0, $max);
+			}
+		}
+		$values['genres'] = json_encode($values['genres'], JSON_INVALID_UTF8_SUBSTITUTE);
+		$values['extra'] = $extra === [] ? null : json_encode($extra, JSON_INVALID_UTF8_SUBSTITUTE);
+		return $values;
+	}
+
+	private static function differs(array $row, array $values): bool {
+		foreach (self::COMPARED as $c) {
+			if ((string)($row[$c] ?? '') !== (string)($values[$c] ?? '')) {
+				return true;
+			}
+		}
+		return abs((float)$row['duration'] - (float)$values['duration']) > 0.01;
+	}
+
+	/**
+	 * @param array<string, mixed> $values columns, with genres as a list
+	 * @param array<string, mixed> $ov overrides
+	 * @return array{0: array, 1: array} values and extra
+	 */
+	private static function applyEdits(array $values, array $extra, array $ov): array {
+		foreach (self::EDITABLE as $k => [$col, $max]) {
+			if (!array_key_exists($k, $ov) || ($k === 'title' && (string)$ov[$k] === '')) {
+				continue;
+			}
+			if ($col !== null) {
+				$values[$col] = $ov[$k];
+			} elseif ($ov[$k] === null) {
+				unset($extra[$k]);
+			} else {
+				$extra[$k] = $ov[$k];
+			}
+		}
+		if (array_key_exists('genres', $ov)) {
+			$values['genres'] = $ov['genres'];
+		}
+		foreach (['tags', 'explicit', 'abridged'] as $k) {
+			if (!empty($ov[$k])) {
+				$extra[$k] = $ov[$k];
+			} elseif (array_key_exists($k, $ov)) {
+				unset($extra[$k]);
+			}
+		}
+		// Further series. Who sets the series without them (an older version, the upload form) means only that one.
+		if (array_key_exists('moreSeries', $ov) || array_key_exists('series', $ov)) {
+			unset($extra['series']);
+			if (!empty($ov['moreSeries'])) {
+				$extra['series'] = $ov['moreSeries'];
+			}
+		}
+		return [$values, $extra];
+	}
+
+	/**
+	 * Edits as they come from a client, cleaned: unknown keys dropped, empty text becomes null.
+	 * @return array<string, mixed>
+	 */
+	public static function cleanEdits(array $in): array {
+		$text = static fn (mixed $v, int $max): string => is_scalar($v) ? mb_substr(MetadataExtractor::cleanText((string)$v), 0, $max) : '';
+		$out = [];
+		foreach (self::EDITABLE as $k => [, $max]) {
+			if (!array_key_exists($k, $in) || !(is_scalar($in[$k]) || $in[$k] === null)) {
+				continue;
+			}
+			$v = $text($in[$k], $max);
+			if ($k !== 'title' || $v !== '') {
+				$out[$k] = $v === '' ? null : $v;
+			}
+		}
+		foreach (self::EDITABLE_LISTS as $k) {
+			if (is_array($in[$k] ?? null)) {
+				$list = array_map(static fn ($v) => $text($v, 100), array_slice($in[$k], 0, 100));
+				$out[$k] = array_values(array_unique(array_filter($list, static fn ($v) => $v !== '')));
+			}
+		}
+		foreach (self::EDITABLE_FLAGS as $k) {
+			if (array_key_exists($k, $in)) {
+				$out[$k] = filter_var($in[$k], FILTER_VALIDATE_BOOLEAN);
+			}
+		}
+		if (is_array($in['moreSeries'] ?? null)) {
+			$out['moreSeries'] = [];
+			foreach (array_slice($in['moreSeries'], 0, 20) as $s) {
+				$name = is_array($s) ? $text($s['name'] ?? '', 512) : '';
+				if ($name !== '') {
+					$seq = $text($s['seq'] ?? '', 32);
+					$out['moreSeries'][] = ['name' => $name, 'seq' => $seq === '' ? null : $seq];
+				}
+			}
+		}
+		if (array_key_exists('series', $out) && $out['series'] === null) {
+			$out['seriesSeq'] = null;
+		}
+		return $out;
+	}
+
+	// ----- ebooks from OPDS+ -----
+
+	/** @return list<array> ebook files for an audiobook */
+	private function opdsEbooks(string $userId, string $title, ?string $author, array $ov, array $before): array {
+		$chosen = $ov['opdsEbook'] ?? null;
+		if ($chosen === 0 || !$this->opds->links($userId)) {
+			return [];
+		}
+		if ($this->opds->works($userId) === null) {
+			// Not readable right now: keep what was found before.
+			return array_values(array_filter($before, static fn ($e) => !empty($e['opds'])));
+		}
+		$work = $chosen !== null ? $this->opds->byFile($userId, (int)$chosen) : null;
+		return ($work ?? $this->opds->find($userId, $title, $author))['files'] ?? [];
+	}
+
+	/**
+	 * The ebooks of OPDS+ as a library, without those that belong to an audiobook or lie in a library folder.
+	 * @param array<string|int, true> $seen
+	 */
+	private function scanOpds(string $userId, array &$seen): int {
+		$rows = [];
+		$taken = [];
+		foreach ($this->getItemRows($userId) as $r) {
+			if ((string)$r['library_id'] === OpdsLink::LIBRARY) {
+				$rows[(string)$r['item_key']] = $r;
+			} else {
+				$taken += array_fill_keys(array_column(Serializer::extra($r)['ebooks'] ?? [], 'id'), true);
+			}
+		}
+		$works = $this->opds->works($userId);
+		if ($works === null) {
+			$seen += array_fill_keys(array_keys($rows), true);
+			return count($rows);
+		}
+		$n = 0;
+		foreach ($works as $w) {
+			$key = (string)$w['files'][0]['id'];
+			if (array_intersect_key($taken, array_fill_keys(array_column($w['files'], 'id'), true)) !== []) {
+				continue;
+			}
+			$seen[$key] = true;
+			$n++;
+			$extra = ['ebookOnly' => true, 'ebooks' => $w['files']];
+			if ($w['cover']) {
+				$extra['opdsCover'] = (int)$key;
+			}
+			foreach (['publisher', 'language', 'isbn'] as $k) {
+				if ($w[$k] !== '') {
+					$extra[$k] = $w[$k];
+				}
+			}
+			$null = static fn (string $v) => $v === '' ? null : $v;
+			$values = [
+				'user_id' => $userId, 'library_id' => OpdsLink::LIBRARY, 'item_key' => $key, 'is_file' => 1, 'rel_path' => $w['files'][0]['path'],
+				'title' => $w['title'] !== '' ? $w['title'] : pathinfo($w['files'][0]['name'], PATHINFO_FILENAME),
+				'subtitle' => null, 'author' => $null($w['author']), 'narrator' => null, 'series' => $null($w['series']),
+				'series_seq' => $w['series'] !== '' ? $null($w['seriesSeq']) : null, 'published_year' => $null($w['year']),
+				'description' => $null($w['description']), 'genres' => $w['genres'],
+			];
+			$ov = $this->scanOverrides[$key] ?? [];
+			[$values, $extra] = self::applyEdits($values, $extra, $ov);
+			$ebook = $w['files'][0]['id'];
+			if (array_key_exists('ebook', $ov) && ($ov['ebook'] === 0 || in_array($ov['ebook'], array_column($w['files'], 'id'), true))) {
+				$ebook = $ov['ebook'] ?: null;
+			}
+			$values = self::toColumns($values, $extra) + [
+				'duration' => 0.0, 'size' => array_sum(array_column($w['files'], 'size')), 'chapters' => '[]', 'cover_file_id' => null,
+				'ebook_file_id' => $ebook, 'updated_at' => (int)(microtime(true) * 1000), 'mtime' => $w['files'][0]['mtime'],
+			];
+			$row = $rows[$key] ?? $this->getItemRow($userId, $key);
+			if ($row !== null && !self::differs($row, $values)) {
+				continue;
+			}
+			$qb = $this->db->getQueryBuilder();
+			if ($row === null) {
+				$values['added_at'] = $values['updated_at'];
+				if (isset($ov['cover'])) {
+					$values['cover_cache'] = $ov['cover'];
+				}
+				$qb->insert('abs_items');
+				foreach ($values as $k => $v) {
+					$qb->setValue($k, $qb->createNamedParameter($v, self::ptype($v)));
+				}
+			} else {
+				$qb->update('abs_items');
+				foreach ($values as $k => $v) {
+					$qb->set($k, $qb->createNamedParameter($v, self::ptype($v)));
+				}
+				$qb->where($qb->expr()->eq('id', $qb->createNamedParameter((int)$row['id'], IQueryBuilder::PARAM_INT)));
+			}
+			$qb->executeStatement();
+		}
+		return $n;
+	}
+
+	/** Choose the OPDS+ ebook of an audiobook: a file id, 0 for none, null for the automatic match. */
+	public function setOpdsEbook(string $userId, string $key, ?int $fileId): void {
+		$this->patchOverrides($userId, $key, ['opdsEbook' => $fileId, 'ebook' => null]);
+		$row = $this->getItemRow($userId, $key);
+		if ($row !== null) {
+			$extra = Serializer::extra($row);
+			$own = array_filter($extra['ebooks'] ?? [], static fn ($e) => empty($e['opds']));
+			if ($own === []) {
+				$files = $this->opdsEbooks($userId, (string)$row['title'], $row['author'], $this->getOverrides($userId, $key), []);
+				$extra['ebooks'] = $files;
+				if ($files === []) {
+					unset($extra['ebooks']);
+				}
+				$this->updateRow((int)$row['id'], ['extra' => $extra === [] ? null : json_encode($extra, JSON_INVALID_UTF8_SUBSTITUTE), 'ebook_file_id' => $files[0]['id'] ?? null]);
+			}
+		}
+	}
+
+	/** Make one of the book's ebooks the one to read, or none. */
+	public function setPrimaryEbook(string $userId, string $key, int $fileId): void {
+		$row = $this->getItemRow($userId, $key);
+		if ($row !== null && ($fileId === 0 || in_array($fileId, array_column(Serializer::extra($row)['ebooks'] ?? [], 'id'), true))) {
+			$this->patchOverrides($userId, $key, ['ebook' => $fileId]);
+			$this->updateRow((int)$row['id'], ['ebook_file_id' => $fileId ?: null]);
+		}
+	}
+
+	private function updateRow(int $id, array $values): void {
+		$values['updated_at'] = (int)(microtime(true) * 1000);
+		$qb = $this->db->getQueryBuilder();
+		$qb->update('abs_items');
+		foreach ($values as $k => $v) {
+			$qb->set($k, $qb->createNamedParameter($v, self::ptype($v)));
+		}
+		$qb->where($qb->expr()->eq('id', $qb->createNamedParameter($id, IQueryBuilder::PARAM_INT)));
+		$qb->executeStatement();
 	}
 
 	private static function ptype(mixed $v): int {
@@ -561,36 +898,36 @@ class LibraryService {
 	}
 
 	/**
-	 * Store metadata edits (the keys of EDITABLE) as overrides and apply them now.
-	 * A null value clears that field. The audio files are not changed.
+	 * Store edits (see cleanEdits) as overrides and apply them now. The files are not changed.
 	 */
 	public function updateMetadata(string $userId, string $key, array $changes): ?array {
 		$row = $this->getItemRow($userId, $key);
 		if ($row === null) {
 			return null;
 		}
-		$ov = $this->getOverrides($userId, $key);
-		foreach (array_keys(self::EDITABLE) as $k) {
-			if (array_key_exists($k, $changes)) {
-				$ov[$k] = $changes[$k];
-			}
+		if (array_key_exists('series', $changes)) {
+			$changes += ['moreSeries' => []];
 		}
-		$this->saveOverrides($userId, $key, $ov);
-		$qb = $this->db->getQueryBuilder();
-		$qb->update('abs_items');
-		foreach (self::EDITABLE as $k => $col) {
-			if (array_key_exists($k, $changes)) {
-				$v = $changes[$k] === null ? null : mb_substr((string)$changes[$k], 0, $col === 'series_seq' ? 32 : 512);
-				if ($k === 'title' && ($v === null || $v === '')) {
-					continue;
-				}
-				$qb->set($col, $qb->createNamedParameter($v, $v === null ? IQueryBuilder::PARAM_NULL : IQueryBuilder::PARAM_STR));
-			}
-		}
-		$qb->set('updated_at', $qb->createNamedParameter((int)(microtime(true) * 1000), IQueryBuilder::PARAM_INT))
-			->where($qb->expr()->eq('id', $qb->createNamedParameter((int)$row['id'], IQueryBuilder::PARAM_INT)));
-		$qb->executeStatement();
+		$this->saveOverrides($userId, $key, $changes + $this->getOverrides($userId, $key));
+		$values = array_intersect_key($row, array_flip(['title', 'subtitle', 'author', 'narrator', 'series', 'series_seq', 'published_year', 'description']));
+		$values['genres'] = json_decode((string)$row['genres'], true) ?: [];
+		[$values, $extra] = self::applyEdits($values, Serializer::extra($row), $changes);
+		$this->updateRow((int)$row['id'], self::toColumns($values, $extra));
 		return $this->getItemRow($userId, $key);
+	}
+
+	/** @return array<string, array> item key => overrides */
+	private function allOverrides(string $userId): array {
+		$qb = $this->db->getQueryBuilder();
+		$qb->select('item_key', 'data')->from('abs_overrides')
+			->where($qb->expr()->eq('user_id', $qb->createNamedParameter($userId)));
+		$res = $qb->executeQuery();
+		$out = [];
+		while ($row = $res->fetch()) {
+			$out[(string)$row['item_key']] = json_decode((string)$row['data'], true) ?: [];
+		}
+		$res->closeCursor();
+		return $out;
 	}
 
 	/** @return array<string, mixed> edits (EDITABLE), cover (file name), coverTried (time) */
@@ -704,7 +1041,7 @@ class LibraryService {
 
 	/** Whether the current library folders have scanned books; rows of removed folders don't count. */
 	public function hasItems(string $userId): bool {
-		$libIds = array_column($this->getLibraries($userId), 'id');
+		$libIds = array_values(array_diff(array_column($this->getLibraries($userId), 'id'), [OpdsLink::LIBRARY]));
 		if ($libIds === []) {
 			return false;
 		}
@@ -783,11 +1120,17 @@ class LibraryService {
 				$allowed[] = (int)$item[$col];
 			}
 		}
+		$allowed = array_merge($allowed, array_column(Serializer::extra($item)['ebooks'] ?? [], 'id'));
 		if (!in_array($fileId, $allowed, true)) {
 			return null;
 		}
 		$n = $this->rootFolder->getUserFolder($userId)->getFirstNodeById($fileId);
 		return $n instanceof File && $n->isReadable() ? $n : null;
+	}
+
+	/** A cover OPDS+ keeps for one of the user's ebooks. */
+	public function opdsCover(string $userId, int $fileId): ?File {
+		return $this->opds->cover($userId, $fileId);
 	}
 
 	public function getCachedCover(string $name): ?\OCP\Files\SimpleFS\ISimpleFile {
@@ -806,7 +1149,7 @@ class LibraryService {
 			$qb->delete('abs_tracks')->where($qb->expr()->in('item_id', $qb->createNamedParameter($chunk, IQueryBuilder::PARAM_INT_ARRAY)));
 			$qb->executeStatement();
 		}
-		foreach (['abs_items', 'abs_overrides', 'abs_progress', 'abs_sessions'] as $table) {
+		foreach (['abs_items', 'abs_overrides', 'abs_progress', 'abs_sessions', 'abs_lists'] as $table) {
 			$qb = $this->db->getQueryBuilder();
 			$qb->delete($table)->where($qb->expr()->eq('user_id', $qb->createNamedParameter($userId)));
 			$qb->executeStatement();

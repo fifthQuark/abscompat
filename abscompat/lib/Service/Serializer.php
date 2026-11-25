@@ -45,7 +45,27 @@ class Serializer {
 		return $title;
 	}
 
-	public static function user(string $userId, string $displayName, ?string $email, array $progressRows, array $bookmarks): array {
+	/** What is kept next to the columns: series (further ones), tags, ebooks, publisher, ... */
+	public static function extra(array $item): array {
+		$e = json_decode((string)($item['extra'] ?? ''), true);
+		return is_array($e) ? $e : [];
+	}
+
+	/** @return list<array{name: string, seq: ?string}> all series of a book, the main one first */
+	public static function seriesList(array $item): array {
+		$out = [];
+		if (trim((string)($item['series'] ?? '')) !== '') {
+			$out[] = ['name' => trim((string)$item['series']), 'seq' => ($item['series_seq'] ?? '') === '' ? null : $item['series_seq']];
+		}
+		return array_merge($out, self::extra($item)['series'] ?? []);
+	}
+
+	public static function isEbookOnly(array $item): bool {
+		return !empty(self::extra($item)['ebookOnly']);
+	}
+
+	/** @param list<string> $hiddenSeries ids */
+	public static function user(string $userId, string $displayName, ?string $email, array $progressRows, array $bookmarks, array $hiddenSeries = []): array {
 		return [
 			'id' => $userId,
 			'username' => $userId,
@@ -53,7 +73,7 @@ class Serializer {
 			'type' => 'user',
 			'token' => null,
 			'mediaProgress' => array_values(array_map(static fn ($r) => ProgressService::toJson($r, $userId), $progressRows)),
-			'seriesHideFromContinueListening' => [],
+			'seriesHideFromContinueListening' => $hiddenSeries,
 			'bookmarks' => $bookmarks,
 			'isActive' => true,
 			'isLocked' => false,
@@ -128,16 +148,17 @@ class Serializer {
 				'addedAt' => 0,
 			]],
 			'displayOrder' => $displayOrder,
-			'icon' => 'audiobookshelf',
+			'icon' => $lib['id'] === OpdsLink::LIBRARY ? 'books-1' : 'audiobookshelf',
 			'mediaType' => 'book',
 			'provider' => 'google',
 			'settings' => [
-				'coverAspectRatio' => 1,
+				// 1 = square, 0 = book covers.
+				'coverAspectRatio' => $lib['id'] === OpdsLink::LIBRARY ? 0 : 1,
 				'disableWatcher' => true,
 				'skipMatchingMediaWithAsin' => false,
 				'skipMatchingMediaWithIsbn' => false,
 				'autoScanCronExpression' => null,
-				'audiobooksOnly' => true,
+				'audiobooksOnly' => false,
 				'epubsAllowScriptedContent' => false,
 				'hideSingleBookSeries' => false,
 				'onlyShowLaterBooksInContinueSeries' => false,
@@ -162,9 +183,9 @@ class Serializer {
 		$authors = self::splitNames($item['author'] ?? null);
 		$narrators = self::splitNames($item['narrator'] ?? null);
 		$genres = json_decode((string)($item['genres'] ?? '[]'), true) ?: [];
-		$seriesName = $item['series'] ?? null;
-		$seq = $item['series_seq'] ?? null;
-		$seriesStr = $seriesName ? ($seq !== null && $seq !== '' ? $seriesName . ' #' . $seq : $seriesName) : '';
+		$extra = self::extra($item);
+		$series = self::seriesList($item);
+		$seriesStr = implode(', ', array_map(static fn ($s) => $s['name'] . ($s['seq'] !== null ? ' #' . $s['seq'] : ''), $series));
 		$m = [
 			'title' => $title,
 			'titleIgnorePrefix' => self::ignorePrefix($title),
@@ -176,18 +197,18 @@ class Serializer {
 			'genres' => $genres,
 			'publishedYear' => $item['published_year'] ?? null,
 			'publishedDate' => null,
-			'publisher' => null,
+			'publisher' => $extra['publisher'] ?? null,
 			'description' => $item['description'] ?? null,
-			'isbn' => null,
-			'asin' => null,
-			'language' => null,
-			'explicit' => false,
-			'abridged' => false,
+			'isbn' => $extra['isbn'] ?? null,
+			'asin' => $extra['asin'] ?? null,
+			'language' => $extra['language'] ?? null,
+			'explicit' => !empty($extra['explicit']),
+			'abridged' => !empty($extra['abridged']),
 		];
 		if (!$minified) {
 			$m['authors'] = array_map(static fn ($a) => ['id' => self::authorId($a), 'name' => $a], $authors);
 			$m['narrators'] = $narrators;
-			$m['series'] = $seriesName ? [['id' => self::seriesId($seriesName), 'name' => $seriesName, 'sequence' => $seq]] : [];
+			$m['series'] = array_map(static fn ($s) => ['id' => self::seriesId($s['name']), 'name' => $s['name'], 'sequence' => $s['seq']], $series);
 			$m['descriptionPlain'] = $item['description'] ?? null;
 		}
 		return $m;
@@ -253,24 +274,49 @@ class Serializer {
 		];
 	}
 
-	public static function ebookFile(array $item): ?array {
-		if ($item['ebook_file_id'] === null) {
-			return null;
-		}
+	/** @return list<array{id: int, name: string, path: string, size: int, mtime: int, opds?: bool}> */
+	public static function ebooks(array $item): array {
+		$list = self::extra($item)['ebooks'] ?? [];
+		// Scanned before 0.8: only the file id of an EPUB is known until the next scan.
+		return $list === [] && $item['ebook_file_id'] !== null
+			? [['id' => (int)$item['ebook_file_id'], 'name' => 'book.epub', 'path' => 'book.epub', 'size' => 0, 'mtime' => 0]] : $list;
+	}
+
+	private static function ebookMetadata(array $e, string $libPath): array {
+		$root = !empty($e['opds']) ? '' : rtrim($libPath, '/');
 		return [
-			'ino' => (string)$item['ebook_file_id'],
-			'metadata' => null,
-			'ebookFormat' => 'epub',
-			'addedAt' => (int)$item['added_at'],
-			'updatedAt' => (int)$item['updated_at'],
-			'isLocal' => false,
-			'localFileId' => null,
-			'contentUrl' => null,
+			'filename' => $e['name'],
+			'ext' => '.' . strtolower(pathinfo($e['name'], PATHINFO_EXTENSION)),
+			'path' => $root . '/' . $e['path'],
+			'relPath' => $e['path'],
+			'size' => $e['size'],
+			'mtimeMs' => $e['mtime'] * 1000,
+			'ctimeMs' => $e['mtime'] * 1000,
+			'birthtimeMs' => 0,
 		];
 	}
 
+	/** The ebook to read; the other ones are supplementary. */
+	public static function ebookFile(array $item, string $libPath): ?array {
+		foreach ($item['ebook_file_id'] === null ? [] : self::ebooks($item) as $e) {
+			if ($e['id'] === (int)$item['ebook_file_id']) {
+				return [
+					'ino' => (string)$e['id'],
+					'metadata' => self::ebookMetadata($e, $libPath),
+					'ebookFormat' => strtolower(pathinfo($e['name'], PATHINFO_EXTENSION)),
+					'addedAt' => (int)$item['added_at'],
+					'updatedAt' => (int)$item['updated_at'],
+					'isLocal' => false,
+					'localFileId' => null,
+					'contentUrl' => null,
+				];
+			}
+		}
+		return null;
+	}
+
 	public static function hasCover(array $item): bool {
-		return $item['cover_file_id'] !== null || ($item['cover_cache'] ?? null) !== null;
+		return $item['cover_file_id'] !== null || ($item['cover_cache'] ?? null) !== null || isset(self::extra($item)['opdsCover']);
 	}
 
 	private static function itemBase(array $item, string $libPath): array {
@@ -306,15 +352,15 @@ class Serializer {
 			'id' => 'b' . $item['item_key'],
 			'metadata' => self::bookMetadata($item, true),
 			'coverPath' => self::hasCover($item) ? '/covers/' . $item['item_key'] : null,
-			'tags' => [],
+			'tags' => self::extra($item)['tags'] ?? [],
 			'numTracks' => count($tracks),
 			'numAudioFiles' => count($tracks),
 			'numChapters' => count($chapters),
 			'duration' => (float)$item['duration'],
 			'size' => (int)$item['size'],
-			'ebookFormat' => $item['ebook_file_id'] !== null ? 'epub' : null,
+			'ebookFormat' => self::ebookFile($item, $libPath)['ebookFormat'] ?? null,
 		];
-		$out['numFiles'] = count($tracks) + ($item['ebook_file_id'] !== null ? 1 : 0) + ($item['cover_file_id'] !== null ? 1 : 0);
+		$out['numFiles'] = count($tracks) + count(self::ebooks($item)) + ($item['cover_file_id'] !== null ? 1 : 0);
 		$out['size'] = (int)$item['size'];
 		return $out;
 	}
@@ -329,12 +375,12 @@ class Serializer {
 			'libraryItemId' => (string)$item['item_key'],
 			'metadata' => self::bookMetadata($item, false),
 			'coverPath' => self::hasCover($item) ? '/covers/' . $item['item_key'] : null,
-			'tags' => [],
+			'tags' => self::extra($item)['tags'] ?? [],
 			'audioFiles' => $audioFiles,
 			'chapters' => array_map(static fn ($c) => [
 				'id' => (int)$c['id'], 'start' => (float)$c['start'], 'end' => (float)$c['end'], 'title' => (string)$c['title'],
 			], $chapters),
-			'ebookFile' => self::ebookFile($item),
+			'ebookFile' => self::ebookFile($item, $libPath),
 			'duration' => (float)$item['duration'],
 			'size' => (int)$item['size'],
 			'tracks' => array_map(static fn ($t) => self::audioTrack($item, $t, $libPath), $tracks),
@@ -349,11 +395,10 @@ class Serializer {
 			'updatedAt' => $af['updatedAt'],
 			'fileType' => 'audio',
 		], $audioFiles);
-		if ($item['ebook_file_id'] !== null) {
+		foreach (self::ebooks($item) as $e) {
 			$libraryFiles[] = [
-				'ino' => (string)$item['ebook_file_id'],
-				'metadata' => ['filename' => 'book.epub', 'ext' => '.epub', 'path' => '', 'relPath' => 'book.epub', 'size' => null],
-				'isSupplementary' => false, 'addedAt' => (int)$item['added_at'], 'updatedAt' => (int)$item['updated_at'], 'fileType' => 'ebook',
+				'ino' => (string)$e['id'], 'metadata' => self::ebookMetadata($e, $libPath), 'isSupplementary' => (int)($item['ebook_file_id'] ?? 0) !== $e['id'],
+				'addedAt' => (int)$item['added_at'], 'updatedAt' => (int)$item['updated_at'], 'fileType' => 'ebook',
 			];
 		}
 		$out['libraryFiles'] = $libraryFiles;

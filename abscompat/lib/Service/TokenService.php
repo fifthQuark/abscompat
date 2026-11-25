@@ -100,6 +100,10 @@ class TokenService {
 		return $row;
 	}
 
+	public function isActiveUser(string $userId): bool {
+		return $this->userManager->get($userId)?->isEnabled() === true;
+	}
+
 	private function touch(array $row, ?int $newExpiry = null): void {
 		$now = $this->time->getTime();
 		if ($newExpiry === null && $now - (int)$row['last_used'] < 60) {
@@ -191,7 +195,17 @@ class TokenService {
 		return max($own, $v);
 	}
 
+	/** Open playback sessions stream without a token, so they end when one is revoked. Apps still signed in reopen theirs with the next sync. */
+	private function closeSessions(string $userId): void {
+		$qb = $this->db->getQueryBuilder();
+		$qb->update('abs_sessions')->set('closed', $qb->createNamedParameter(1, IQueryBuilder::PARAM_INT))
+			->where($qb->expr()->eq('user_id', $qb->createNamedParameter($userId)))
+			->andWhere($qb->expr()->eq('closed', $qb->createNamedParameter(0, IQueryBuilder::PARAM_INT)));
+		$qb->executeStatement();
+	}
+
 	public function revoke(string $userId, int $id): bool {
+		$this->closeSessions($userId);
 		$qb = $this->db->getQueryBuilder();
 		$qb->delete(self::TABLE)
 			->where($qb->expr()->eq('user_id', $qb->createNamedParameter($userId)))
@@ -204,6 +218,7 @@ class TokenService {
 
 	/** Log out every device (refresh + access tokens); API keys stay. Returns the number of logins. */
 	public function revokeAllDevices(string $userId): int {
+		$this->closeSessions($userId);
 		$qb = $this->db->getQueryBuilder();
 		$qb->delete(self::TABLE)
 			->where($qb->expr()->eq('user_id', $qb->createNamedParameter($userId)))

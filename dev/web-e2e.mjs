@@ -218,6 +218,74 @@ try {
     assert.equal((await call('GET', '/web/library')).json.books.length, 1)
     await call('PUT', '/settings/folders', { folders: [LIB] })
   })
+  await check('series of existing books: set, number, rename, clear; kept on rescan, seen by the apps', async () => {
+    const lib = async () => (await call('GET', '/web/library')).json.books
+    const discs = (await lib()).find((x) => x.title === 'Discs')
+    assert.equal(discs.series, null)
+    const r = await call('PUT', '/web/series', { books: [{ id: discs.id, series: '  New\u0000 Saga ', seriesSeq: '1.5' }, { id: book.id, series: 'New Saga', seriesSeq: '' }] })
+    assert.equal(r.status, 200, r.text)
+    assert.deepEqual(r.json.books.map((b) => [b.id, b.series, b.seriesSeq]), [[discs.id, 'New Saga', '1.5'], [book.id, 'New Saga', null]])
+    await put(LIB + '/D/Discs/CD2 - 01.mp3', fixture('plain.mp3'))
+    await call('POST', '/settings/rescan')
+    const all = await lib()
+    assert.deepEqual([discs.id, book.id].map((id) => all.find((b) => b.id === id)).map((b) => [b.series, b.seriesSeq]), [['New Saga', '1.5'], ['New Saga', null]])
+    const { json } = await call('POST', '/settings/apikeys', { name: 'web-e2e-series' })
+    const api = async (p) => (await fetch(base + p, { headers: { authorization: 'Bearer ' + json.token } })).json()
+    const s = (await api(`/api/libraries/${book.libraryId}/series?limit=100`)).results
+    assert.deepEqual(s.map((x) => [x.name, x.books.map((b) => b.id)]), [['New Saga', [discs.id, book.id]]])
+    const id = (await call('GET', '/settings')).json.tokens.find((t) => t.name === 'web-e2e-series').id
+    await call('DELETE', '/settings/tokens/' + id)
+    const back = await call('PUT', '/web/series', { books: [{ id: discs.id, series: '', seriesSeq: '4' }] })
+    assert.deepEqual([back.json.books[0].series, back.json.books[0].seriesSeq], [null, null])
+  })
+  await check('series: refused without books, for unknown books, for other users, and all or nothing', async () => {
+    assert.equal((await call('PUT', '/web/series', { books: [] })).status, 400)
+    assert.equal((await call('PUT', '/web/series', { books: Array(501).fill({ id: book.id }) })).status, 400)
+    for (const bad of [{ id: '0', series: 'X' }, { series: 'X' }, 'x', { id: [book.id], series: 'X' }]) {
+      assert.equal((await call('PUT', '/web/series', { books: [{ id: book.id, series: 'X' }, bad] })).status, 404, JSON.stringify(bad))
+    }
+    const admin = { authorization: 'Basic ' + Buffer.from(`${env.NC_ADMIN_USER}:${env.NC_ADMIN_PASSWORD}`).toString('base64') }
+    assert.equal((await call('PUT', '/web/series', { books: [{ id: book.id, series: 'X' }] }, admin)).status, 404)
+    const noCsrf = await fetch(`${base}/web/series`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ books: [{ id: book.id, series: 'X' }] }) })
+    assert.ok([401, 412].includes(noCsrf.status), String(noCsrf.status))
+    assert.equal((await call('GET', '/web/items/' + book.id)).json.series, 'New Saga')
+  })
+  await check('details: edit, kept on rescan, only changed fields stick; bad input refused', async () => {
+    const id = book.id
+    const put2 = (metadata) => call('PUT', '/web/items/' + id, { metadata })
+    assert.equal((await put2({ title: ' ' })).status, 400)
+    assert.equal((await call('PUT', '/web/items/0', { metadata: { title: 'x' } })).status, 404)
+    const r = await put2({ title: 'My: Title', subtitle: 'Under', tags: ['a', 'b', 'a'], genres: ['G'], publisher: 'P', year: '2001', description: 'Text', explicit: true, moreSeries: [{ name: 'Second', seq: '9' }, { name: '' }], series: 'New Saga', seriesSeq: '', evil: 'x', author: ['no'] })
+    assert.equal(r.status, 200, r.text)
+    await call('POST', '/settings/rescan')
+    const d = (await call('GET', '/web/items/' + id)).json
+    assert.deepEqual([d.subtitle, d.tags, d.genres, d.publisher, d.year, d.description, d.explicit, d.series, d.moreSeries, d.author], ['Under', ['a', 'b'], ['G'], 'P', '2001', 'Text', true, 'New Saga', [{ name: 'Second', seq: '9' }], 'Ann Lee'])
+    assert.equal((await call('PUT', '/web/series/description', { name: 'Second', description: 'Note' })).json.description, 'Note')
+    assert.equal((await call('GET', '/web/series/description?name=second')).json.description, 'Note')
+    await call('PUT', '/web/series/description', { name: 'Second', description: '' })
+  })
+  await check('lists: create, change, delete; other users and foreign books are refused', async () => {
+    const admin = { authorization: 'Basic ' + Buffer.from(`${env.NC_ADMIN_USER}:${env.NC_ADMIN_PASSWORD}`).toString('base64') }
+    const make = (body, h) => call('POST', '/web/lists', { kind: 'collection', libraryId: book.libraryId, name: 'L', items: [book.id], ...body }, h)
+    for (const bad of [{ kind: 'x' }, { name: '<b></b>' }, { libraryId: '0' }]) assert.equal((await make(bad)).status, 400, JSON.stringify(bad))
+    assert.equal((await make({ items: ['0'] })).status, 404)
+    assert.equal((await make({}, admin)).status, 400)
+    const l = (await make({})).json
+    assert.deepEqual((await call('GET', '/web/library')).json.lists, [l])
+    assert.equal((await call('PUT', '/web/lists/' + l.id, { name: 'x', items: ['0'] })).status, 400)
+    for (const m of ['PUT', 'DELETE']) assert.equal((await call(m, '/web/lists/' + l.id, { name: 'x' }, admin)).status, 404, m)
+    assert.deepEqual((await call('PUT', '/web/lists/' + l.id, { name: 'New', description: 'D', items: [] })).json, { ...l, name: 'New', description: 'D', items: [] })
+    assert.equal((await call('DELETE', '/web/lists/' + l.id)).status, 200)
+    assert.deepEqual((await call('GET', '/web/library')).json.lists, [])
+  })
+  await check('bookmarks and statistics on the page', async () => {
+    assert.deepEqual((await call('PUT', `/web/items/${book.id}/bookmarks`, { time: 2.5, title: 'Here' })).json.bookmarks, [{ time: 2.5, title: 'Here' }])
+    assert.deepEqual((await call('PUT', `/web/items/${book.id}/bookmarks`, { time: 2.5, title: 'There' })).json.bookmarks, [{ time: 2.5, title: 'There' }])
+    assert.deepEqual((await call('DELETE', `/web/items/${book.id}/bookmarks?time=2.5`)).json.bookmarks, [])
+    assert.equal((await call('DELETE', `/web/items/${book.id}/bookmarks?time=2.5`)).status, 404)
+    const s = (await call('GET', '/web/stats?year=2020')).json
+    assert.equal(s.year.totalListeningTime, 0)
+  })
   await check('an upload without audio is reported; another user sees nothing', async () => {
     const p = await plan({ title: 'Empty' }, [], false)
     assert.equal((await finish(p.json.folder, {})).status, 422)

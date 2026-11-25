@@ -6,6 +6,8 @@ namespace OCA\AbsCompat\Controller;
 
 use OCA\AbsCompat\AppInfo\Application;
 use OCA\AbsCompat\Service\LibraryService;
+use OCA\AbsCompat\Service\OpdsLink;
+use OCA\AbsCompat\Service\StreamingService;
 use OCA\AbsCompat\Service\TokenService;
 use OCP\AppFramework\Controller;
 use OCP\AppFramework\Http;
@@ -29,6 +31,8 @@ class SettingsController extends Controller {
 		private IUserSession $userSession,
 		private LibraryService $library,
 		private TokenService $tokens,
+		private StreamingService $streaming,
+		private OpdsLink $opds,
 	) {
 		parent::__construct(Application::APP_ID, $request);
 	}
@@ -62,6 +66,8 @@ class SettingsController extends Controller {
 			'libraries' => $libraries,
 			'lastScan' => $this->library->getLastScan($uid),
 			'tokens' => $this->tokens->listForUser($uid),
+			'streaming' => ['allowed' => $this->streaming->isAllowed(), 'on' => $this->streaming->isOn($uid)],
+			'opds' => ['available' => $this->opds->available($uid), 'links' => $this->opds->links($uid), 'library' => $this->opds->hasLibrary($uid)],
 		];
 	}
 
@@ -80,6 +86,27 @@ class SettingsController extends Controller {
 		}
 		$this->library->setFolderPaths($this->uid(), $clean);
 		return new JSONResponse($this->state($this->uid()));
+	}
+
+	/** Playing without downloading. The page asks for confirmation, with a warning, before turning it on. */
+	#[NoAdminRequired]
+	#[FrontpageRoute(verb: 'PUT', url: '/settings/streaming')]
+	public function setStreaming(bool $enabled = false): JSONResponse {
+		$uid = $this->uid();
+		if ($enabled && !$this->streaming->isAllowed()) {
+			return new JSONResponse(['error' => 'The administrator does not allow streaming'], Http::STATUS_FORBIDDEN);
+		}
+		$this->streaming->set($uid, $enabled);
+		return new JSONResponse($this->state($uid));
+	}
+
+	/** What to use from OPDS+. Only this app's settings change. */
+	#[NoAdminRequired]
+	#[FrontpageRoute(verb: 'PUT', url: '/settings/opds')]
+	public function setOpds(bool $links = true, bool $library = false): JSONResponse {
+		$uid = $this->uid();
+		$this->opds->configure($uid, $links, $library);
+		return new JSONResponse($this->state($uid));
 	}
 
 	/** Go back to the instance default folders. */
@@ -135,12 +162,17 @@ class SettingsController extends Controller {
 
 	#[FrontpageRoute(verb: 'GET', url: '/settings/admin')]
 	public function getAdmin(): JSONResponse {
-		return new JSONResponse(['defaultFolders' => $this->library->getDefaultFolderPaths()]);
+		return new JSONResponse(['defaultFolders' => $this->library->getDefaultFolderPaths(), 'allowStreaming' => $this->streaming->isAllowed()]);
 	}
 
 	#[FrontpageRoute(verb: 'PUT', url: '/settings/admin')]
-	public function setAdmin(array $defaultFolders = []): JSONResponse {
-		$this->library->setDefaultFolderPaths($defaultFolders);
-		return new JSONResponse(['defaultFolders' => $this->library->getDefaultFolderPaths()]);
+	public function setAdmin(?array $defaultFolders = null, ?bool $allowStreaming = null): JSONResponse {
+		if ($defaultFolders !== null) {
+			$this->library->setDefaultFolderPaths($defaultFolders);
+		}
+		if ($allowStreaming !== null) {
+			$this->streaming->allow($allowStreaming);
+		}
+		return $this->getAdmin();
 	}
 }

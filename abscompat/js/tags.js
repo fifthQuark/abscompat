@@ -401,8 +401,18 @@
 		return books
 	}
 
+	/** Like the server: "Saga #2" is book 2; of several series separated by semicolons the first counts. */
+	function seriesOf(tags) {
+		const first = (s) => String(s || '').split(';').map((x) => x.trim()).filter(Boolean)[0] || ''
+		const text = first(tags.series) || first(tags.grouping)
+		const m = /^(.*\S)\s+#([^#\s]+)$/.exec(text)
+		const part = text ? first(tags.seriesSeq).replace(/^(\d+)\s*\/\s*\d+$/, '$1') : ''
+		return { series: m ? m[1] : text, seriesSeq: part || (m ? m[2] : '') }
+	}
+
 	function describe(audio, ebook, image, parts, split) {
 		const first = audio[0].tags || {}
+		const tagged = seriesOf(first)
 		const single = audio.length === 1
 		const fileName = audio[0].path.split('/').pop().replace(/\.[^.]+$/, '')
 		const guess = !split
@@ -417,8 +427,8 @@
 			meta: {
 				title: first.album || (single && first.title) || guess.title || '',
 				author: first.albumArtist || first.artist || guess.author || '',
-				series: first.series || first.grouping || guess.series || '',
-				seriesSeq: first.seriesSeq || (first.series || first.grouping ? '' : guess.seriesSeq) || '',
+				series: tagged.series || guess.series || '',
+				seriesSeq: tagged.seriesSeq || (tagged.series ? '' : guess.seriesSeq) || '',
 				narrator: first.narrator || '',
 			},
 		}

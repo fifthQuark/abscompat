@@ -10,6 +10,10 @@
 - **Progress syncs** between your devices when they are back online. It is stored in Nextcloud.
 - **Audiobook ↔ ebook sync** with [CrossPoint Sync](https://github.com/crosspoint-reader/crosspoint-sync): your listening position follows the matching ebook on your e-reader, and back.
 - **Library page.** See your books by author, series and progress, and upload new ones: title, author, series and cover are filled in from the files, and the right folders are created.
+- **Series.** Read from tags and folder names, or set on the library page. The app then offers the next book of a series you have started.
+- **Playlists, collections, tags and bookmarks**, editable details, and a year in review.
+- **Ebooks** next to your audiobooks or on their own. Works with the OPDS+ app: matching ebooks are added by themselves.
+- **Streaming is optional.** It is off by default, because it costs bandwidth for every listen and some hosting providers limit or forbid it.
 - **Covers.** Find square covers for books without one, by hand or automatically. This is off by default, because it sends the book's title and author to Apple's public audiobook search. Your files are not changed.
 - **No extra server.** Everything runs inside Nextcloud in PHP, so it works on managed hosting too.
 
@@ -27,7 +31,7 @@
 
 This app is not affiliated with the Audiobookshelf project.
 ]]></description>
-    <version>0.7.1</version>
+    <version>0.8.0</version>
     <licence>agpl</licence>
     <author>abscompat contributors</author>
     <namespace>AbsCompat</namespace>

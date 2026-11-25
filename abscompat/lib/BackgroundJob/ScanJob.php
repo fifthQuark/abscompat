@@ -59,7 +59,7 @@ class ScanJob extends TimedJob {
 				$this->logger->warning('Looking up covers failed for ' . $uid . ': ' . $e->getMessage(), ['app' => 'abscompat', 'exception' => $e]);
 			}
 		}
-		// Keep playback sessions (listening stats) for a year.
-		$this->sessions->deleteOldSessions((int)(microtime(true) * 1000) - 365 * 86400 * 1000);
+		// Keep playback sessions (listening stats) for two years, so the past year can be reviewed.
+		$this->sessions->deleteOldSessions((int)(microtime(true) * 1000) - 730 * 86400 * 1000);
 	}
 }

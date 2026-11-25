@@ -11,13 +11,18 @@ use Psr\Log\LoggerInterface;
  * Reads duration, tags, chapters and embedded cover art from one audio file with getID3.
  */
 class MetadataExtractor {
+	/** Raised when more is read from the files, so known books are read once more. 2: series, publisher, ids. */
+	public const VERSION = 2;
+
 	public function __construct(
 		private LoggerInterface $logger,
 	) {
 	}
 
 	/**
-	 * @return array{duration: float, codec: ?string, bitRate: ?int, tags: array<string,string>, chapters: list<array{start: float, end: ?float, title: string}>, picture: ?array{data: string, mime: string}}
+	 * "v" is missing when the file could not be read.
+	 *
+	 * @return array{v?: int, duration: float, codec: ?string, bitRate: ?int, tags: array<string,string>, chapters: list<array{start: float, end: ?float, title: string}>, picture: ?array{data: string, mime: string}}
 	 */
 	public function extract(File $file, bool $wantPicture): array {
 		$empty = ['duration' => 0.0, 'codec' => null, 'bitRate' => null, 'tags' => [], 'chapters' => [], 'picture' => null];
@@ -51,7 +56,7 @@ class MetadataExtractor {
 		}
 
 		$duration = (float)($info['playtime_seconds'] ?? 0);
-		$comments = $info['comments'] ?? [];
+		$comments = self::allTags($info);
 		$tag = static function (string ...$keys) use ($comments): ?string {
 			foreach ($keys as $k) {
 				if (!empty($comments[$k]) && is_array($comments[$k])) {
@@ -73,8 +78,13 @@ class MetadataExtractor {
 			'genre' => $tag('genre'),
 			'description' => $tag('description', 'comment', 'long_description'),
 			'subtitle' => $tag('subtitle'),
-			'series' => $tag('series', 'mvnm', 'grouping'),
-			'seriesPart' => $tag('series-part', 'mvin'),
+			'series' => $tag('series', 'mvnm', 'movementname'),
+			'seriesPart' => $tag('series-part', 'mvin', 'movement'),
+			'grouping' => $tag('grouping', 'content_group_description', 'grp1'),
+			'publisher' => $tag('publisher', 'label'),
+			'language' => ($l = $tag('language')) !== null && strtolower($l) !== 'undetermined' ? $l : null,
+			'isbn' => $tag('isbn'),
+			'asin' => $tag('asin', 'audible_asin', 'cdek'),
 			'track' => $tag('track_number', 'tracknumber', 'track'),
 			'disc' => $tag('disc_number', 'part_of_a_set', 'discnumber'),
 		], static fn ($v) => $v !== null);
@@ -86,6 +96,7 @@ class MetadataExtractor {
 		}
 
 		return [
+			'v' => self::VERSION,
 			'duration' => $duration,
 			'codec' => isset($info['audio']['dataformat']) ? (string)$info['audio']['dataformat'] : null,
 			'bitRate' => isset($info['audio']['bitrate']) ? (int)$info['audio']['bitrate'] : null,
@@ -93,6 +104,30 @@ class MetadataExtractor {
 			'chapters' => self::chapters($info, $duration),
 			'picture' => $picture,
 		];
+	}
+
+	/**
+	 * getID3's tags by lower-case name ("SERIES" is the usual spelling in m4b files), plus the MP3
+	 * ones it keeps elsewhere: free text (TXXX), and Apple's movement and grouping frames.
+	 */
+	private static function allTags(array $info): array {
+		$out = [];
+		foreach ($info['comments'] ?? [] as $k => $v) {
+			$out[strtolower((string)$k)] ??= $v;
+		}
+		foreach (is_array($info['comments']['text'] ?? null) ? $info['comments']['text'] : [] as $k => $v) {
+			$out[strtolower((string)$k)] ??= [$v];
+		}
+		foreach (['MVNM', 'MVIN', 'GRP1'] as $frame) {
+			$raw = $info['id3v2'][$frame][0]['data'] ?? null;
+			if (is_string($raw) && $raw !== '') {
+				$charset = [0 => 'ISO-8859-1', 1 => 'UTF-16', 2 => 'UTF-16BE', 3 => 'UTF-8'][ord($raw[0])] ?? null;
+				if ($charset !== null) {
+					$out[strtolower($frame)] ??= [mb_convert_encoding(substr($raw, 1), 'UTF-8', $charset)];
+				}
+			}
+		}
+		return $out;
 	}
 
 	/**

@@ -138,10 +138,30 @@
 		$('#abscompat-scan-status').textContent = msg
 	}
 
+	function renderOptions() {
+		$('#abscompat-streaming').checked = state.streaming.on
+		$('#abscompat-streaming-row').hidden = !state.streaming.allowed
+		$('#abscompat-streaming-forbidden').hidden = state.streaming.allowed
+		$('#abscompat-opds').hidden = !state.opds.available
+		$('#abscompat-opds-links').checked = state.opds.links
+		$('#abscompat-opds-library').checked = state.opds.library
+	}
+
 	async function load() {
 		state = await api('GET', '/settings')
 		renderLibraries()
 		renderTokens()
+		renderOptions()
+	}
+
+	async function setStreaming(enabled) {
+		try {
+			state = await api('PUT', '/settings/streaming', { enabled })
+			toast(enabled ? t('Streaming is on') : t('Streaming is off'))
+		} catch (e) {
+			toast(e.message, true)
+		}
+		renderOptions()
 	}
 
 	let scanning = false
@@ -231,6 +251,30 @@
 		})
 
 		$('#abscompat-rescan').addEventListener('click', rescan)
+
+		$('#abscompat-streaming').addEventListener('change', (ev) => {
+			if (!ev.target.checked) return setStreaming(false)
+			// Stays off until it is confirmed.
+			ev.target.checked = false
+			OC.dialogs.confirm(
+				t('Streaming uses your server\'s bandwidth for every listen and can keep it busy while a book plays. Your hosting provider may limit it or not allow it. Turn it on anyway?'),
+				t('Turn on streaming?'),
+				(ok) => ok && setStreaming(true),
+				true,
+			)
+		})
+		for (const id of ['#abscompat-opds-links', '#abscompat-opds-library']) {
+			$(id).addEventListener('change', async () => {
+				try {
+					state = await api('PUT', '/settings/opds', { links: $('#abscompat-opds-links').checked, library: $('#abscompat-opds-library').checked })
+					renderOptions()
+					await rescan()
+				} catch (e) {
+					toast(e.message, true)
+					renderOptions()
+				}
+			})
+		}
 
 		$('#abscompat-key-form').addEventListener('submit', async (ev) => {
 			ev.preventDefault()

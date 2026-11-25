@@ -40,6 +40,32 @@ folders on it, check the title, author, series and cover it filled in, and click
 creates the folders above for you. Each folder becomes one book (`CD1`, `CD2`, … are joined);
 books you drop as single m4b files become one book each.
 
+#### Series
+
+A book's series comes from its tags (series, movement or grouping) or from the folders
+(`Author/Series/1 - Title`). To set it yourself, open a book and click **Edit details**, or use
+**New series** and **Edit** in the Series view, where you can also number, add and remove books. This
+is stored in Nextcloud; your files are not changed. A book can be in several series.
+
+Once you have finished a book, the next one of its series shows up under **Continue series**, in
+the apps too.
+
+#### Details, playlists and collections
+
+**Edit details** on a book changes its title, authors, narrators, series, genres, tags and more. The
+apps can do the same. **Lists** holds collections and playlists; **Add to list** on a book puts it
+on one. Both belong to you alone. **Statistics** shows what you listened to.
+
+#### Ebooks
+
+Ebooks (EPUB, AZW3, MOBI, PDF, CBZ, CBR) in an audiobook's folder belong to it. Ebooks in folders
+without audio are books of their own.
+
+With the [OPDS+](https://github.com/fifthQuark/nextcloud-opds) app installed, an audiobook without an
+ebook gets the OPDS+ one with the same title and author. You can choose another, or none, on the
+book. The settings can also show the remaining OPDS+ ebooks as a library. OPDS+ is only read: this app
+never writes to its tables, settings or files, and never starts its scans.
+
 #### Covers
 
 Books without a cover can get one under **Covers** on the Audiobooks page, or with **Find cover**
@@ -65,6 +91,19 @@ tried.
    Settings → Security → Devices & sessions and use that instead.
 3. Download books to listen offline. Progress is sent when you are online again.
 
+**Streaming** (playing without downloading) is off. Before you turn it on under Settings →
+Audiobookshelf, consider:
+
+- **Bandwidth:** every listen sends the audio again, about 30 to 60 MB per hour and up to 150 MB for
+  high quality files. It counts as traffic of your server and as mobile data.
+- **Server load:** a playing book can keep one PHP process busy for a long time. Small or shared
+  hosting has few of them, so Nextcloud may become slow or stop answering.
+- **Your provider:** some limit traffic or long requests, or forbid media streaming. They may slow
+  down, charge for or suspend an account.
+
+An administrator can forbid streaming for everyone. Voice downloads and streams from the same
+address, so the switch can't stop it from streaming.
+
 The connection icon in the app stays yellow ("socket not connected"). That's expected: this
 server has no live socket connection. Downloads, playback and sync still work. Without the socket,
 the Account page and the in-player bookmark button aren't available.
@@ -85,12 +124,12 @@ sign out a single device, delete a key, or sign out all devices at once.
 ## Limits
 
 - Books are served as whole files (with resume). There is no transcoding or HLS streaming.
-- Podcasts, collections, playlists, author photos and online metadata matching are not
-  supported.
-- The library page does not play audio. Details can be set when uploading, not changed there
-  afterwards. Covers can be added to books that have none in their files.
-- Details entered when uploading, and edits from apps (title, authors, series), are stored in
-  Nextcloud. The audio files are never changed.
+- Podcasts, author photos and online metadata matching are not supported. Collections are not
+  shared between users.
+- The library page does not play audio or open ebooks.
+- No live connection (socket): PHP can't keep one open. Bookmarks, lists and statistics are on the
+  library page instead.
+- Details entered when uploading, and edits, are stored in Nextcloud. The files are never changed.
 
 ## Development
 
@@ -142,6 +181,12 @@ node dev/scan-e2e.mjs
 
 ```bash
 node dev/web-e2e.mjs
+```
+
+With OPDS+ installed in the container:
+
+```bash
+node dev/opds-e2e.mjs
 ```
 
 ```bash

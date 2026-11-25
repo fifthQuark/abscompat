@@ -92,6 +92,36 @@
 .abs-cover-search input { flex: 1 1 200px; min-width: 0; margin: 0; }
 .abs-cover-one .abs-grid, .abs-cover-all .abs-grid { margin-top: 12px; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px; }
 
+.abs .abs-series-edit { min-height: 32px; margin: 0; margin-inline-start: 8px; padding: 4px 12px; font-size: 14px; }
+.abs-dialog h4 { margin: 16px 0 4px; font-size: 16px; font-weight: bold; }
+.abs-field-seriesName { grid-column: span 5; }
+.abs-series-buttons { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+.abs-series-list { margin: 0; padding: 0; list-style: none; }
+.abs-series-list li { display: flex; align-items: center; gap: 10px; padding: 4px 0; border-bottom: 1px solid var(--color-border); }
+.abs-series-title { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.abs-series-title .abs-muted { display: block; font-size: 14px; }
+.abs .abs-series-list button { flex: none; margin: 0; }
+.abs .abs-series-no { flex: none; margin: 0; }
+.abs .abs-series-list .abs-series-no { width: 64px; }
+.abs-series-all input[type=search] { width: 100%; box-sizing: border-box; margin: 0; }
+.abs-series-row { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
+.abs-series-row input[list] { flex: 1; min-width: 0; margin: 0; }
+.abs .abs-series-row .abs-series-no { width: 80px; }
+.abs .abs-series-row button { flex: none; margin: 0; }
+.abs-dialog textarea { width: 100%; box-sizing: border-box; margin: 0; resize: vertical; }
+.abs-field-description { grid-column: 1 / -1; }
+.abs-list-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-end; }
+.abs .abs-list-actions .button, .abs .abs-list-actions button { margin: 0; min-height: 32px; padding: 4px 10px; font-size: 14px; }
+.abs-ebook input[type=search], .abs-list-edit input[type=search] { width: 100%; box-sizing: border-box; margin: 0 0 8px; }
+.abs-kind { margin: 20px 0 8px; font-size: 20px; font-weight: bold; }
+.abs-week { display: flex; gap: 8px; align-items: flex-end; max-width: 600px; }
+.abs-week > div { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 4px; font-size: 14px; text-align: center; }
+.abs-week-bar { width: 100%; min-height: 2px; border-radius: var(--border-radius); background: var(--color-primary-element); }
+.abs-stats { display: grid; gap: 6px; margin: 0; }
+.abs-stats div { display: flex; gap: 12px; }
+.abs .abs-stats dt { flex: 0 0 180px; padding: 0; text-align: start; font-weight: normal; color: var(--color-text-maxcontrast); }
+.abs .abs-stats dd { margin: 0; padding: 0; min-width: 0; overflow-wrap: anywhere; }
+
 @media (max-width: 600px) {
 	.abs-head h2 { flex: 1 1 100%; }
 	.abs-head .abs-search { order: 5; flex: 1 1 100%; }
@@ -101,7 +131,8 @@
 	.abs-book-top > .abs-cover-wrap { flex: none; width: min(200px, 60%); }
 	.abs-draft { flex-direction: column; }
 	.abs .abs-cover-button { flex: none; }
+	.abs .abs-stats dt { flex-basis: 110px; }
 	.abs-field, .abs-field-author, .abs-field-narrator { grid-column: 1 / -1; }
-	.abs-field-series { grid-column: span 4; }
+	.abs-field-series, .abs-field-seriesName { grid-column: span 4; }
 	.abs-field-seriesSeq { grid-column: span 2; }
 }

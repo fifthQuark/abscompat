@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.7.0 – unreleased
+## 0.7.0 – 2026-11-25
 
 - Find covers for books without one: search and choose, look up all missing ones, or let it
   happen automatically (off by default; sends title and author to Apple's audiobook search).

@@ -66,11 +66,34 @@ ebook gets the OPDS+ one with the same title and author. You can choose another,
 book. The settings can also show the remaining OPDS+ ebooks as a library. OPDS+ is only read: this app
 never writes to its tables, settings or files, and never starts its scans.
 
+#### Podcasts
+
+Podcasts come from [rePod](https://apps.nextcloud.com/apps/repod), or rather from GPodderSync, where
+rePod keeps your subscriptions and where you are in each episode. With GPodderSync installed, the
+podcasts you subscribed to show up in the apps as a **Podcasts** library. Subscribe and unsubscribe
+in rePod (or AntennaPod).
+
+- Episodes play and download straight from the publisher, like in rePod. They don't pass through
+  your Nextcloud, so streaming doesn't need to be on.
+- Where you are in an episode is saved in GPodderSync, so rePod and AntennaPod pick it up, and the
+  other way round. It's written with GPodderSync's own code, the same way AntennaPod saves it.
+- Feeds are read on your server and kept for an hour.
+- You can turn the library off under Settings → Audiobookshelf.
+
+#### Listening on the page
+
+With streaming turned on (see below), books on the Audiobooks page get a **Play** button, and a
+player stays at the bottom of the page. It saves your position like the apps do. Without streaming,
+there is no player.
+
 #### Covers
 
 Books without a cover can get one under **Covers** on the Audiobooks page, or with **Find cover**
 on a book. **Find missing covers** looks all of them up; a cover is only used when title and author
 both match. Tick the box there to have it done automatically, once an hour and after uploads.
+
+A book with a cover in its files can get another one with **Change cover**. The file isn't
+changed: remove the new cover and the old one is back.
 
 Lookups go from your Nextcloud server to Apple's public iTunes search and contain the title and
 author, nothing else. They are off until you use them. Covers added this way are made square
@@ -124,9 +147,9 @@ sign out a single device, delete a key, or sign out all devices at once.
 ## Limits
 
 - Books are served as whole files (with resume). There is no transcoding or HLS streaming.
-- Podcasts, author photos and online metadata matching are not supported. Collections are not
-  shared between users.
-- The library page does not play audio or open ebooks.
+- Author photos and online metadata matching are not supported. Collections are not shared between
+  users. Podcasts are only read from rePod (GPodderSync); episodes are not stored in Nextcloud.
+- The library page does not open ebooks. It plays audio only with streaming on.
 - No live connection (socket): PHP can't keep one open. Bookmarks, lists and statistics are on the
   library page instead.
 - Details entered when uploading, and edits, are stored in Nextcloud. The files are never changed.
@@ -187,6 +210,12 @@ With OPDS+ installed in the container:
 
 ```bash
 node dev/opds-e2e.mjs
+```
+
+With GPodderSync installed in the container:
+
+```bash
+node dev/podcast-e2e.mjs
 ```
 
 ```bash

@@ -852,10 +852,15 @@ class LibraryService {
 			} else {
 				$folder->newFile($name, $picture['data']);
 			}
+			// A cover the user chose stays in front of it.
 			$qb = $this->db->getQueryBuilder();
 			$qb->update('abs_items')->set('cover_cache', $qb->createNamedParameter($name))
 				->where($qb->expr()->eq('user_id', $qb->createNamedParameter($userId)))
-				->andWhere($qb->expr()->eq('item_key', $qb->createNamedParameter($key)));
+				->andWhere($qb->expr()->eq('item_key', $qb->createNamedParameter($key)))
+				->andWhere($qb->expr()->orX(
+					$qb->expr()->isNull('cover_cache'),
+					$qb->expr()->notLike('cover_cache', $qb->createNamedParameter(self::CUSTOM_COVER . '%')),
+				));
 			$qb->executeStatement();
 		} catch (\Throwable $e) {
 			$this->logger->info('Could not cache embedded cover: ' . $e->getMessage(), ['app' => 'abscompat']);
@@ -977,6 +982,15 @@ class LibraryService {
 			$folder->getFile($name)->delete();
 		}
 		$this->patchOverrides($userId, $key, ['cover' => $jpeg === null ? null : $name, 'coverTried' => $jpeg === null ? time() : null]);
+		if ($jpeg === null) {
+			// Back to the art embedded in the audio, if it was kept.
+			foreach (['jpg', 'png'] as $ext) {
+				if ($folder->fileExists(md5($userId) . '-' . $key . '.' . $ext)) {
+					$name = md5($userId) . '-' . $key . '.' . $ext;
+					$jpeg = '';
+				}
+			}
+		}
 		$qb = $this->db->getQueryBuilder();
 		$qb->update('abs_items')
 			->set('cover_cache', $qb->createNamedParameter($jpeg === null ? null : $name, self::ptype($jpeg === null ? null : $name)))

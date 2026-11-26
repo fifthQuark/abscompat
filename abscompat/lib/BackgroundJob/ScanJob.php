@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace OCA\AbsCompat\BackgroundJob;
 
 use OCA\AbsCompat\Service\CoverService;
+use OCA\AbsCompat\Service\PodcastService;
 use OCA\AbsCompat\Service\LibraryService;
 use OCA\AbsCompat\Service\SessionService;
 use OCP\AppFramework\Utility\ITimeFactory;
@@ -24,6 +25,7 @@ class ScanJob extends TimedJob {
 		private LibraryService $library,
 		private SessionService $sessions,
 		private CoverService $covers,
+		private PodcastService $podcasts,
 		private LoggerInterface $logger,
 	) {
 		parent::__construct($time);
@@ -45,6 +47,15 @@ class ScanJob extends TimedJob {
 				$this->library->scanUser((string)$uid, $left);
 			} catch (\Throwable $e) {
 				$this->logger->warning('Library scan failed for ' . $uid . ': ' . $e->getMessage(), ['app' => 'abscompat', 'exception' => $e]);
+			}
+		}
+		// Podcast feeds, so the apps don't wait for them.
+		$deadline = microtime(true) + 60;
+		foreach ($users as $uid) {
+			try {
+				$this->podcasts->refresh((string)$uid, $deadline);
+			} catch (\Throwable $e) {
+				$this->logger->info('Podcast feeds not refreshed for ' . $uid . ': ' . $e->getMessage(), ['app' => 'abscompat']);
 			}
 		}
 		// Covers for users who switched that on; stops when the time is up and continues next hour.

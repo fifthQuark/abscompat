@@ -2,7 +2,7 @@
 # Installs a built release tarball into fresh Nextcloud containers and runs all test suites.
 #   dev/test-matrix.sh abscompat/build/abscompat-X.Y.Z.tar.gz [versions...]   (default: 33 34 35)
 #   DB=sqlite|mysql|pgsql (default sqlite; mysql = MariaDB), DOCKER=docker to use docker, KEEP=1
-#   to keep the containers. Needs node, ffmpeg; CROSSPOINT_DIR and OPDS_DIR (an OPDS+ checkout, only read) optional.
+#   to keep the containers. Needs node, ffmpeg; CROSSPOINT_DIR, OPDS_DIR (an OPDS+ checkout, only read) and GPODDER_DIR (GPodderSync) optional.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 TARBALL=$(realpath "$1"); shift
@@ -85,6 +85,14 @@ for v in $VERSIONS; do
     $D exec "$name" chown -R www-data: /var/www/html/custom_apps/opds
     $D exec -u www-data "$name" php occ app:enable opds >/dev/null
     ENV_FILE=$envf NC_CONTAINER=$name DOCKER=$D node dev/opds-e2e.mjs | quiet || rc=1
+  fi
+  if [ -n "${GPODDER_DIR:-}" ]; then
+    echo "- podcasts"
+    $D exec "$name" mkdir -p /var/www/html/custom_apps/gpoddersync
+    git -C "$GPODDER_DIR" archive HEAD | $D exec -i "$name" tar -x -C /var/www/html/custom_apps/gpoddersync
+    $D exec "$name" chown -R www-data: /var/www/html/custom_apps/gpoddersync
+    $D exec -u www-data "$name" php occ app:enable gpoddersync >/dev/null
+    ENV_FILE=$envf NC_CONTAINER=$name DOCKER=$D node dev/podcast-e2e.mjs | quiet || rc=1
   fi
   if [ -n "${CROSSPOINT_DIR:-}" ]; then
     echo "- crosspoint"

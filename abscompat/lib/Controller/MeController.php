@@ -7,6 +7,8 @@ namespace OCA\AbsCompat\Controller;
 use OCA\AbsCompat\Service\BookmarkService;
 use OCA\AbsCompat\Service\Catalog;
 use OCA\AbsCompat\Service\HiddenSeries;
+use OCA\AbsCompat\Service\PodcastApi;
+use OCA\AbsCompat\Service\PodcastService;
 use OCA\AbsCompat\Service\SessionService;
 use OCA\AbsCompat\Service\LibraryService;
 use OCA\AbsCompat\Service\ProgressService;
@@ -31,6 +33,7 @@ class MeController extends AbsBaseController {
 		private BookmarkService $bookmarks,
 		private SessionService $sessions,
 		private HiddenSeries $hiddenSeries,
+		private PodcastApi $podcasts,
 	) {
 		parent::__construct($request, $tokens, $library);
 	}
@@ -44,7 +47,9 @@ class MeController extends AbsBaseController {
 		if ($user === null) {
 			return $this->unauthorized();
 		}
-		return new JSONResponse(Serializer::user($uid, $user->getDisplayName(), $user->getEMailAddress(), $this->progress->allForUser($uid), $this->bookmarks->allForUser($uid), $this->hiddenSeries->get($uid)));
+		$json = Serializer::user($uid, $user->getDisplayName(), $user->getEMailAddress(), $this->progress->allForUser($uid), $this->bookmarks->allForUser($uid), $this->hiddenSeries->get($uid));
+		$json['mediaProgress'] = array_merge($json['mediaProgress'], $this->podcasts->progress($uid));
+		return new JSONResponse($json);
 	}
 
 	#[PublicPage]
@@ -78,10 +83,34 @@ class MeController extends AbsBaseController {
 		return new JSONResponse($this->sessions->yearStats($uid, (int)$year));
 	}
 
+	/** An episode's progress; the same address shape is also ABS's "remove from continue listening". */
 	#[PublicPage]
 	#[NoCSRFRequired]
-	#[FrontpageRoute(verb: 'GET', url: '/api/me/progress/{id}/remove-from-continue-listening')]
-	public function hideItem(string $id): JSONResponse {
+	#[FrontpageRoute(verb: 'GET', url: '/api/me/progress/{id}/{episodeId}')]
+	public function episodeProgress(string $id, string $episodeId): JSONResponse {
+		if ($episodeId === 'remove-from-continue-listening') {
+			return $this->hideItem($id);
+		}
+		$uid = $this->currentUser();
+		if ($uid === null) {
+			return $this->unauthorized();
+		}
+		$p = $this->podcasts->getProgress($uid, $id, $episodeId);
+		return $p === null ? $this->notFound('Progress not found') : new JSONResponse($p);
+	}
+
+	#[PublicPage]
+	#[NoCSRFRequired]
+	#[FrontpageRoute(verb: 'PATCH', url: '/api/me/progress/{id}/{episodeId}')]
+	public function patchEpisodeProgress(string $id, string $episodeId): JSONResponse {
+		$uid = $this->currentUser();
+		if ($uid === null) {
+			return $this->unauthorized();
+		}
+		return $this->podcasts->apply($uid, $id, $episodeId, $this->body()) ? new JSONResponse([]) : $this->notFound('Episode not found');
+	}
+
+	private function hideItem(string $id): JSONResponse {
 		$uid = $this->currentUser();
 		if ($uid === null) {
 			return $this->unauthorized();
@@ -139,7 +168,10 @@ class MeController extends AbsBaseController {
 		foreach ($items as &$it) {
 			$it['progressLastUpdate'] = (int)$prog[$it['id']]['last_update'];
 		}
-		return new JSONResponse(['libraryItems' => $items]);
+		unset($it);
+		$items = array_merge($items, $this->podcasts->inProgress($uid, $limit));
+		usort($items, static fn ($a, $b) => $b['progressLastUpdate'] <=> $a['progressLastUpdate']);
+		return new JSONResponse(['libraryItems' => array_slice($items, 0, $limit)]);
 	}
 
 	#[PublicPage]
@@ -187,6 +219,12 @@ class MeController extends AbsBaseController {
 			if (!is_array($p) || !is_string($p['libraryItemId'] ?? null)) {
 				continue;
 			}
+			if (PodcastService::isPodcastKey($p['libraryItemId'])) {
+				if (is_string($p['episodeId'] ?? null)) {
+					$this->podcasts->apply($uid, $p['libraryItemId'], $p['episodeId'], $p);
+				}
+				continue;
+			}
 			$item = $this->catalog->item($uid, $p['libraryItemId']);
 			if ($item !== null) {
 				$this->progress->apply($uid, $p['libraryItemId'], $p, (float)$item['duration']);
@@ -202,6 +240,10 @@ class MeController extends AbsBaseController {
 		$uid = $this->currentUser();
 		if ($uid === null) {
 			return $this->unauthorized();
+		}
+		if (preg_match('/^mp_(p[0-9a-f]{12})-(e[0-9a-f]{12})$/D', $id, $m)) {
+			$this->podcasts->reset($uid, $m[1], $m[2]);
+			return new JSONResponse([]);
 		}
 		// ABS deletes by media progress id; accept both that and the item id.
 		$this->progress->delete($uid, str_starts_with($id, 'mp_') ? substr($id, 3) : $id);

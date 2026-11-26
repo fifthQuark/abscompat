@@ -8,6 +8,9 @@ use OCA\AbsCompat\Service\Catalog;
 use OCA\AbsCompat\Service\HiddenSeries;
 use OCA\AbsCompat\Service\LibraryService;
 use OCA\AbsCompat\Service\ListService;
+use OCA\AbsCompat\Service\PodcastApi;
+use OCA\AbsCompat\Service\PodcastJson;
+use OCA\AbsCompat\Service\PodcastService;
 use OCA\AbsCompat\Service\ProgressService;
 use OCA\AbsCompat\Service\Serializer;
 use OCA\AbsCompat\Service\TokenService;
@@ -26,6 +29,7 @@ class LibraryController extends AbsBaseController {
 		private Catalog $catalog,
 		private HiddenSeries $hiddenSeries,
 		private ListService $lists,
+		private PodcastApi $podcasts,
 	) {
 		parent::__construct($request, $tokens, $library);
 	}
@@ -59,6 +63,10 @@ class LibraryController extends AbsBaseController {
 		foreach ($this->library->getLibraries($uid) as $i => $lib) {
 			$out[] = Serializer::library($lib, $i + 1, $withStats ? $this->stats($uid, $lib['id']) : null);
 		}
+		// Podcasts from rePod (GPodderSync), last: the first library is the default one.
+		if ($this->podcasts->hasLibrary($uid)) {
+			$out[] = PodcastJson::library(count($out) + 1);
+		}
 		return new JSONResponse(['libraries' => $out]);
 	}
 
@@ -71,6 +79,16 @@ class LibraryController extends AbsBaseController {
 			return $this->unauthorized();
 		}
 		$libs = $this->library->getLibraries($uid);
+		if ($id === PodcastService::LIBRARY && $this->podcasts->isOn($uid)) {
+			$json = PodcastJson::library(count($libs) + 1);
+			return new JSONResponse(!str_contains((string)$this->request->getParam('include'), 'filterdata') ? $json : [
+				'library' => $json,
+				'filterdata' => ['authors' => [], 'genres' => [], 'tags' => [], 'series' => [], 'narrators' => [], 'languages' => [], 'publishers' => [], 'publishedDecades' => [],
+					'bookCount' => 0, 'authorCount' => 0, 'seriesCount' => 0, 'podcastCount' => count($this->podcasts->items($uid, 'title', false)), 'numIssues' => 0, 'loadedAt' => (int)(microtime(true) * 1000)],
+				'issues' => 0,
+				'numUserPlaylists' => 0,
+			]);
+		}
 		foreach ($libs as $i => $lib) {
 			if ($lib['id'] !== $id) {
 				continue;
@@ -179,6 +197,15 @@ class LibraryController extends AbsBaseController {
 		if ($uid === null) {
 			return $this->unauthorized();
 		}
+		if ($id === PodcastService::LIBRARY && $this->podcasts->isOn($uid)) {
+			$sort = (string)$this->request->getParam('sort', 'media.metadata.title');
+			$desc = in_array((string)$this->request->getParam('desc', '0'), ['1', 'true'], true);
+			$limit = max(0, (int)$this->request->getParam('limit', 0));
+			$page = max(0, (int)$this->request->getParam('page', 0));
+			$all = $this->podcasts->items($uid, $sort, $desc);
+			return new JSONResponse(['results' => $limit > 0 ? array_slice($all, $page * $limit, $limit) : $all, 'total' => count($all), 'limit' => $limit, 'page' => $page,
+				'sortBy' => $sort, 'sortDesc' => $desc, 'filterBy' => null, 'mediaType' => 'podcast', 'minified' => true, 'collapseseries' => false, 'include' => '', 'offset' => $page * $limit]);
+		}
 		if ($this->library->getLibrary($uid, $id) === null) {
 			return $this->notFound('Library not found');
 		}
@@ -280,6 +307,9 @@ class LibraryController extends AbsBaseController {
 		if ($uid === null) {
 			return $this->unauthorized();
 		}
+		if ($id === PodcastService::LIBRARY && $this->podcasts->isOn($uid)) {
+			return new JSONResponse($this->podcasts->shelves($uid, max(1, min(50, (int)($this->request->getParam('limit') ?: 10)))));
+		}
 		if ($this->library->getLibrary($uid, $id) === null) {
 			return $this->notFound('Library not found');
 		}
@@ -359,6 +389,11 @@ class LibraryController extends AbsBaseController {
 		$uid = $this->currentUser();
 		if ($uid === null) {
 			return $this->unauthorized();
+		}
+		if ($id === PodcastService::LIBRARY && $this->podcasts->isOn($uid)) {
+			$q = mb_strtolower(trim((string)$this->request->getParam('q', '')));
+			return new JSONResponse(['book' => [], 'podcast' => $this->podcasts->search($uid, $q, max(1, min(100, (int)($this->request->getParam('limit') ?: 12)))),
+				'episodes' => [], 'narrators' => [], 'tags' => [], 'genres' => [], 'series' => [], 'authors' => []]);
 		}
 		if ($this->library->getLibrary($uid, $id) === null) {
 			return $this->notFound('Library not found');
@@ -525,6 +560,20 @@ class LibraryController extends AbsBaseController {
 			}
 		}
 		return new JSONResponse($out);
+	}
+
+	#[PublicPage]
+	#[NoCSRFRequired]
+	#[FrontpageRoute(verb: 'GET', url: '/api/libraries/{id}/recent-episodes')]
+	public function recentEpisodes(string $id): JSONResponse {
+		$uid = $this->currentUser();
+		if ($uid === null) {
+			return $this->unauthorized();
+		}
+		if ($id !== PodcastService::LIBRARY || !$this->podcasts->isOn($uid)) {
+			return $this->notFound('Library not found');
+		}
+		return new JSONResponse($this->podcasts->recent($uid, max(1, min(100, (int)($this->request->getParam('limit') ?: 25))), max(0, (int)$this->request->getParam('page', 0))));
 	}
 
 	/** Rename a series in all its books, or change its description. */

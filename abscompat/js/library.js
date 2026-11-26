@@ -56,7 +56,7 @@
 		return b >= 1e6 ? Math.round(b / 1e6) + ' MB' : Math.max(1, Math.round(b / 1e3)) + ' KB'
 	}
 
-	let data = { libraries: [], books: [], lists: [], opds: false, covers: { auto: false, online: false } }
+	let data = { libraries: [], books: [], lists: [], opds: false, streaming: false, covers: { auto: false, online: false } }
 	let loaded = false
 	let view = 'home'
 	const ui = { search: '', sort: 'title', filter: 'all', library: '' }
@@ -543,10 +543,14 @@
 							h('span', null, b.ebookOnly ? t('{pct}% read', { pct: Math.round(b.progress.progress * 100) }) : t('{pct}% listened, {left} left', { pct: Math.round(b.progress.progress * 100), left: fmtDuration(left) })))
 							: h('p.abs-muted', null, t('Not started')),
 					h('p.abs-book-actions', null,
+						data.streaming && !b.ebookOnly && h('button.primary', { type: 'button', onclick: () => {
+							d.shut()
+							Player.play(b)
+						} }, st === 'progress' ? t('Continue') : t('Play')),
 						h('a.button', { href: OC.generateUrl('/f/' + b.id) }, t('Show in Files')),
 						h('button', { type: 'button', onclick: () => editBook(b) }, t('Edit details')),
 						h('button', { type: 'button', onclick: () => Lists.choose(b) }, t('Add to list')),
-						b.coverEditable && !b.ebookOnly && h('button', { type: 'button', onclick: () => Covers.openBook(b) }, b.hasCover ? t('Change cover') : t('Find cover'))))),
+						b.coverEditable && h('button', { type: 'button', onclick: () => Covers.openBook(b) }, b.hasCover ? t('Change cover') : t('Find cover'))))),
 			b.description && h('p.abs-desc', { dir: 'auto' }, b.description),
 			b.chapters.length > 1 && h('details', null, h('summary', null, n('%n chapter', '%n chapters', b.chapters.length)),
 				h('ol.abs-list', null, b.chapters.map((c) => h('li', null, h('span', { dir: 'auto' }, c.title), h('span.abs-muted', null, fmtClock(c.start)))))),
@@ -699,6 +703,180 @@
 		search()
 		d.showModal()
 	}
+
+	// ----- player (only with streaming on) -----
+
+	const Player = (function () {
+		const SYNC_EVERY = 15
+		let bar = null
+		let audio = null
+		let s = null // { book, sessionId, tracks, chapters, duration, index }
+		let listened = 0
+		let lastTick = null
+		let timer = null
+		let busy = false
+		const els = {}
+
+		const now = () => (s ? s.tracks[s.index].start + (audio.currentTime || 0) : 0)
+		const chapterAt = (sec) => (s ? [...s.chapters].reverse().find((c) => sec >= c.start) : null)
+
+		function build() {
+			audio = new Audio()
+			audio.preload = 'auto'
+			audio.addEventListener('timeupdate', tick)
+			audio.addEventListener('play', () => { lastTick = null; show() })
+			audio.addEventListener('pause', () => { show(); sync(false) })
+			audio.addEventListener('ended', next)
+			audio.addEventListener('error', () => {
+				if (!s) return
+				toast(t('The audio could not be loaded. Is streaming still on?'), true)
+				show()
+			})
+			const btn = (label, text, onclick, cls) => h('button' + (cls || ''), { type: 'button', 'aria-label': label, title: label, onclick }, text)
+			els.cover = h('span.abs-player-cover')
+			els.title = h('a.abs-player-title', { dir: 'auto', href: '#' })
+			els.chapter = h('span.abs-player-chapter', { dir: 'auto' })
+			els.play = btn(t('Play'), '▶', () => (audio.paused ? audio.play().catch((e) => toast(e.message, true)) : audio.pause()), '.primary.abs-player-play')
+			els.seek = h('input.abs-player-seek', { type: 'range', min: '0', step: '1', 'aria-label': t('Position'), oninput: () => { els.time.textContent = fmtClock(+els.seek.value) + ' / ' + fmtClock(s.duration) }, onchange: () => seek(+els.seek.value) })
+			els.time = h('span.abs-player-time')
+			els.speed = h('select', { 'aria-label': t('Speed'), onchange: () => { audio.playbackRate = +els.speed.value; remember() } },
+				[0.75, 1, 1.1, 1.25, 1.5, 1.75, 2].map((x) => h('option', { value: String(x), selected: x === 1 }, x + '×')))
+			bar = h('div.abs-player', { role: 'region', 'aria-label': t('Player') },
+				els.cover,
+				h('div.abs-player-text', null, els.title, els.chapter),
+				h('div.abs-player-controls', null,
+					btn(t('Back 30 seconds'), '−30', () => seek(now() - 30)), els.play, btn(t('Forward 30 seconds'), '+30', () => seek(now() + 30))),
+				h('div.abs-player-bar', null, els.seek, els.time),
+				els.speed,
+				btn(t('Close player'), '✕', () => stop(), '.abs-player-close'))
+			root.append(bar)
+			root.classList.add('abs-has-player')
+			window.addEventListener('pagehide', () => sync(true, true))
+			if ('mediaSession' in navigator) {
+				const ms = navigator.mediaSession
+				ms.setActionHandler('play', () => audio.play())
+				ms.setActionHandler('pause', () => audio.pause())
+				ms.setActionHandler('seekbackward', () => seek(now() - 30))
+				ms.setActionHandler('seekforward', () => seek(now() + 30))
+			}
+			try {
+				const r = +localStorage.getItem('abscompat-speed')
+				if (r) els.speed.value = String(r)
+			} catch (e) { /* storage unavailable */ }
+		}
+		function remember() {
+			try {
+				localStorage.setItem('abscompat-speed', els.speed.value)
+			} catch (e) { /* storage unavailable */ }
+		}
+
+		function show() {
+			if (!s) return
+			const sec = now()
+			els.play.textContent = audio.paused ? '▶' : '❚❚'
+			els.play.setAttribute('aria-label', audio.paused ? t('Play') : t('Pause'))
+			els.play.title = els.play.getAttribute('aria-label')
+			els.seek.max = String(Math.floor(s.duration))
+			if (document.activeElement !== els.seek) els.seek.value = String(Math.floor(sec))
+			els.time.textContent = fmtClock(sec) + ' / ' + fmtClock(s.duration)
+			const c = chapterAt(sec)
+			els.chapter.textContent = c && s.chapters.length > 1 ? c.title : s.book.author || ''
+		}
+
+		function tick() {
+			const t0 = performance.now()
+			if (!audio.paused && lastTick !== null) listened += Math.min(5, (t0 - lastTick) / 1000) * audio.playbackRate
+			lastTick = audio.paused ? null : t0
+			show()
+			if (listened >= SYNC_EVERY) sync(false)
+		}
+
+		async function sync(close, beacon) {
+			if (!s || busy) return
+			const body = { currentTime: now(), timeListened: listened, close: !!close }
+			listened = 0
+			const b = data.books.find((x) => x.id === s.book.id)
+			if (b) {
+				b.progress = Object.assign(b.progress || {}, { currentTime: body.currentTime, progress: s.duration ? body.currentTime / s.duration : 0, isFinished: false, hidden: false, lastUpdate: Date.now() })
+			}
+			try {
+				await fetch(url('/web/sessions/' + s.sessionId + '/sync'), { method: 'POST', keepalive: !!beacon, headers: { 'Content-Type': 'application/json', requesttoken: OC.requestToken }, body: JSON.stringify(body) })
+			} catch (e) { /* the next sync carries the position */ }
+		}
+
+		function load(index, at, playing) {
+			s.index = index
+			const tr = s.tracks[index]
+			if (!audio.src.endsWith(tr.url)) audio.src = tr.url
+			const set = () => {
+				audio.currentTime = Math.max(0, at - tr.start)
+				if (playing) audio.play().catch(() => show())
+			}
+			if (audio.readyState >= 1) set()
+			else audio.addEventListener('loadedmetadata', set, { once: true })
+		}
+
+		function seek(sec) {
+			if (!s) return
+			sec = Math.max(0, Math.min(s.duration - 0.5, sec))
+			const i = Math.max(0, s.tracks.findIndex((tr) => sec >= tr.start && sec < tr.start + tr.duration))
+			load(i, sec, !audio.paused)
+			show()
+		}
+
+		function next() {
+			if (s.index + 1 < s.tracks.length) return load(s.index + 1, s.tracks[s.index + 1].start, true)
+			sync(true)
+			const b = data.books.find((x) => x.id === s.book.id)
+			if (b) b.progress = Object.assign(b.progress || {}, { isFinished: true, progress: 1 })
+			render()
+			show()
+		}
+
+		async function play(b) {
+			if (s && s.book.id === b.id) return audio.paused && audio.play()
+			if (s) await stop()
+			let r
+			try {
+				r = await api('POST', '/web/items/' + encodeURIComponent(b.id) + '/play')
+			} catch (e) {
+				return toast(e.message, true)
+			}
+			if (!bar) build()
+			bar.hidden = false
+			root.classList.add('abs-has-player')
+			s = { book: b, sessionId: r.sessionId, tracks: r.tracks, chapters: r.chapters, duration: r.duration, index: 0 }
+			listened = 0
+			els.cover.replaceChildren(cover(b))
+			els.title.textContent = b.title
+			els.title.onclick = (e) => {
+				e.preventDefault()
+				showBook(b.id)
+			}
+			if ('mediaSession' in navigator && window.MediaMetadata) {
+				navigator.mediaSession.metadata = new MediaMetadata({ title: b.title, artist: b.author || '', album: b.series || '', artwork: b.hasCover ? [{ src: url('/web/items/' + b.id + '/cover') + '?v=' + b.updatedAt }] : [] })
+			}
+			audio.playbackRate = +els.speed.value
+			const start = r.startTime >= r.duration - 1 ? 0 : r.startTime
+			const i = Math.max(0, r.tracks.findIndex((tr) => start >= tr.start && start < tr.start + tr.duration))
+			load(i, start, true)
+			show()
+		}
+
+		async function stop() {
+			if (!s) return
+			audio.pause()
+			await sync(true)
+			s = null
+			audio.removeAttribute('src')
+			audio.load()
+			bar.hidden = true
+			root.classList.remove('abs-has-player')
+			render()
+		}
+
+		return { play, stop }
+	})()
 
 	// ----- playlists and collections -----
 
@@ -925,6 +1103,7 @@
 			const b = data.books.find((x) => x.id === id)
 			if (b) {
 				b.hasCover = r.hasCover
+				b.coverChosen = r.coverChosen
 				b.updatedAt = r.updatedAt
 			}
 			render()
@@ -1070,8 +1249,10 @@
 						input.addEventListener('change', () => input.files[0] && use(() => upload(input.files[0])))
 						input.click()
 					} }, t('Upload an image')),
-					b.hasCover && h('button', { type: 'button', onclick: () => use(() => api('DELETE', '/web/items/' + b.id + '/cover')) }, t('Remove cover')),
-					h('span.abs-muted', null, t('Images are made square.'))),
+					b.coverChosen && h('button', { type: 'button', onclick: () => use(() => api('DELETE', '/web/items/' + b.id + '/cover')) }, b.coverInFiles ? t('Use the cover from the files again') : t('Remove cover')),
+					h('span.abs-muted', null, b.coverInFiles && !b.coverChosen
+						? t('Images are made square. The cover in the book\'s files stays as it is and comes back when you remove the new one.')
+						: t('Images are made square.'))),
 				status, results]))
 			d.showModal()
 		}

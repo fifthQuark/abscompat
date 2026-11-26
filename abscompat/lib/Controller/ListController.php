@@ -57,10 +57,10 @@ class ListController extends AbsBaseController {
 		if ($uid === null) {
 			return $this->unauthorized();
 		}
-		if ($this->library->getLibrary($uid, $libraryId) === null) {
+		$list = $libraryId === 'podcasts' ? [] : $this->lists->all($uid, $kind, $libraryId);
+		if ($libraryId !== 'podcasts' && $this->library->getLibrary($uid, $libraryId) === null) {
 			return $this->notFound('Library not found');
 		}
-		$list = $this->lists->all($uid, $kind, $libraryId);
 		$limit = max(0, (int)$this->request->getParam('limit', 0));
 		$page = max(0, (int)$this->request->getParam('page', 0));
 		$shown = $limit > 0 ? array_slice($list, $page * $limit, $limit) : $list;

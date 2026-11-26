@@ -187,11 +187,28 @@ try {
     assert.equal((await call('DELETE', `/web/items/${b.id}/cover`)).json.hasCover, false)
     assert.equal((await call('GET', `/web/items/${b.id}/cover`)).status, 404)
   })
-  await check('covers in the files are never replaced; bad images and foreign addresses are refused', async () => {
+  await check('a cover in the files can be replaced; removing the new one brings it back; the file stays', async () => {
+    const type = async () => (await fetch(`${base}/web/items/${book.id}/cover`, { headers: auth })).headers.get('content-type')
+    assert.equal(await type(), 'image/png')
+    assert.equal((await call('DELETE', `/web/items/${book.id}/cover`)).status, 409, 'nothing chosen to remove')
+    assert.equal((await call('POST', `/web/items/${book.id}/cover/auto`)).status, 409, 'no lookups for books with a cover')
+    const r = await uploadCover(book.id, png)
+    assert.deepEqual([r.status, r.json.hasCover, r.json.coverChosen], [200, true, true], JSON.stringify(r))
+    assert.deepEqual(await coverSize(book.id), [96, 96])
+    const d = (await call('GET', '/web/items/' + book.id)).json
+    assert.deepEqual([d.coverChosen, d.coverInFiles, d.coverEditable], [true, true, true])
+    await call('POST', '/settings/rescan')
+    assert.deepEqual(await coverSize(book.id), [96, 96], 'kept on rescan')
+    const login = await (await fetch(base + '/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: user, password: env.NC_PLAIN_PASSWORD }) })).json()
+    const app = await fetch(`${base}/api/items/${book.id}/cover`, { headers: { authorization: 'Bearer ' + login.user.accessToken } })
+    assert.equal(app.headers.get('content-type'), 'image/jpeg', 'the apps get the new one too')
+    await fetch(base + '/logout', { method: 'POST', headers: { authorization: 'Bearer ' + login.user.accessToken } })
+    assert.deepEqual((await call('DELETE', `/web/items/${book.id}/cover`)).json.coverChosen, false)
+    assert.equal(await type(), 'image/png')
+    assert.ok(await exists(LIB + '/Ann Lee/Saga/3 - My - Title/cover.png'), 'the file is untouched')
+  })
+  await check('bad images and foreign addresses are refused', async () => {
     const other = (await call('GET', '/web/library')).json.books.find((x) => x.title === 'Discs')
-    assert.equal((await uploadCover(book.id, png)).status, 409)
-    assert.equal((await call('DELETE', `/web/items/${book.id}/cover`)).status, 409)
-    assert.equal((await call('POST', `/web/items/${book.id}/cover/auto`)).status, 409)
     for (const bad of [Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>'), Buffer.from('GIF89a'), png.subarray(0, 60)]) {
       assert.equal((await uploadCover(other.id, bad)).status, 422)
     }
@@ -285,6 +302,36 @@ try {
     assert.equal((await call('DELETE', `/web/items/${book.id}/bookmarks?time=2.5`)).status, 404)
     const s = (await call('GET', '/web/stats?year=2020')).json
     assert.equal(s.year.totalListeningTime, 0)
+  })
+  await check('the player: only with streaming on, only the book\'s audio, moves the position', async () => {
+    const discs = (await call('GET', '/web/library')).json.books.find((x) => x.title === 'Discs')
+    assert.equal((await call('GET', '/web/library')).json.streaming, false)
+    assert.equal((await call('POST', `/web/items/${discs.id}/play`)).status, 403)
+    await call('PUT', '/settings/streaming', { enabled: true })
+    try {
+      assert.equal((await call('GET', '/web/library')).json.streaming, true)
+      const p = await call('POST', `/web/items/${discs.id}/play`)
+      assert.equal(p.status, 200, p.text)
+      assert.equal(p.json.tracks.length, 2)
+      assert.equal(p.json.tracks[1].start, p.json.tracks[0].duration)
+      const get = (u, headers = {}) => fetch(env.NC_URL + u, { headers: { ...auth, ...headers } })
+      const a = await get(p.json.tracks[0].url, { range: 'bytes=0-9' })
+      assert.deepEqual([a.status, a.headers.get('content-type'), (await a.arrayBuffer()).byteLength], [206, 'audio/mpeg', 10])
+      const other = (await call('GET', '/web/items/' + book.id)).json
+      assert.equal((await get(p.json.tracks[0].url.replace(/\/audio\/\d+$/, '/audio/' + (await call('GET', '/web/library')).json.books.find((x) => x.id === book.id).id))).status, 404, 'not an audio file of this book')
+      assert.equal(other.id, book.id)
+      const admin = { authorization: 'Basic ' + Buffer.from(`${env.NC_ADMIN_USER}:${env.NC_ADMIN_PASSWORD}`).toString('base64') }
+      assert.equal((await fetch(env.NC_URL + p.json.tracks[0].url, { headers: admin })).status, 403, 'another user, without streaming')
+      assert.equal((await call('POST', `/web/sessions/${p.json.sessionId}/sync`, { currentTime: 7, timeListened: 5 })).status, 200)
+      assert.equal((await call('GET', '/web/items/' + discs.id)).json.progress.currentTime, 7)
+      assert.equal((await call('POST', `/web/sessions/${p.json.sessionId}/sync`, { currentTime: 8, timeListened: 1 }, admin)).status, 404, 'not their session')
+      assert.equal((await call('POST', `/web/sessions/${p.json.sessionId}/sync`, { currentTime: 9, close: true })).status, 200)
+      assert.ok((await call('GET', '/web/stats')).json.total >= 5)
+      await call('PUT', '/settings/streaming', { enabled: false })
+      assert.equal((await get(p.json.tracks[0].url)).status, 403, 'off again')
+    } finally {
+      await call('PUT', '/settings/streaming', { enabled: false })
+    }
   })
   await check('an upload without audio is reported; another user sees nothing', async () => {
     const p = await plan({ title: 'Empty' }, [], false)

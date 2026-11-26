@@ -187,7 +187,12 @@ class CoverService {
 
 	// ----- storing -----
 
-	/** Books whose own cover (file or embedded art) must not be replaced. */
+	/** A cover chosen in the app; it wins over the one in the files. */
+	public static function hasChosenCover(array $row): bool {
+		return str_starts_with((string)($row['cover_cache'] ?? ''), LibraryService::CUSTOM_COVER);
+	}
+
+	/** Books with a cover in their files (an image file or embedded art). */
 	public static function hasOwnCover(array $row): bool {
 		return $row['cover_file_id'] !== null
 			|| ($row['cover_cache'] !== null && !str_starts_with((string)$row['cover_cache'], LibraryService::CUSTOM_COVER));

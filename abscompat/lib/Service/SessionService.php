@@ -18,6 +18,7 @@ class SessionService {
 		private IDBConnection $db,
 		private ProgressService $progress,
 		private Catalog $catalog,
+		private PodcastApi $podcasts,
 	) {
 	}
 
@@ -101,6 +102,41 @@ class SessionService {
 		];
 	}
 
+	/** POST /api/items/:id/play/:episodeId. The episode's key is kept as "podcast/episode". */
+	public function startEpisode(string $userId, array $podcast, array $episode, float $startTime, array $deviceInfo, string $mediaPlayer): array {
+		$now = self::nowMs();
+		$sid = $this->uuid();
+		$dev = self::deviceInfo($deviceInfo);
+		$qb = $this->db->getQueryBuilder();
+		$qb->insert(self::TABLE)->values([
+			'session_id' => $qb->createNamedParameter($sid),
+			'user_id' => $qb->createNamedParameter($userId),
+			'item_key' => $qb->createNamedParameter($podcast['id'] . '/' . $episode['id']),
+			'play_method' => $qb->createNamedParameter(0, IQueryBuilder::PARAM_INT),
+			'media_player' => $qb->createNamedParameter(mb_substr($mediaPlayer, 0, 64)),
+			'device_info' => $qb->createNamedParameter(json_encode($dev)),
+			'started_at' => $qb->createNamedParameter($now, IQueryBuilder::PARAM_INT),
+			'updated_at' => $qb->createNamedParameter($now, IQueryBuilder::PARAM_INT),
+			'time_listening' => $qb->createNamedParameter(0.0),
+			'start_time' => $qb->createNamedParameter($startTime),
+			'cur_time' => $qb->createNamedParameter($startTime),
+		]);
+		$qb->executeStatement();
+		$item = PodcastJson::item($podcast, true);
+		return [
+			'id' => $sid, 'userId' => $userId, 'libraryId' => PodcastService::LIBRARY, 'libraryItemId' => $podcast['id'],
+			'bookId' => null, 'episodeId' => $episode['id'], 'mediaType' => 'podcast',
+			'mediaMetadata' => $item['media']['metadata'], 'chapters' => [],
+			'displayTitle' => $episode['title'], 'displayAuthor' => $podcast['title'],
+			'coverPath' => $item['media']['coverPath'], 'duration' => (float)$episode['duration'],
+			'playMethod' => 0, 'mediaPlayer' => $mediaPlayer, 'deviceInfo' => $dev, 'serverVersion' => Application::ABS_VERSION,
+			'date' => date('Y-m-d'), 'dayOfWeek' => date('l'), 'timeListening' => 0, 'startTime' => $startTime, 'currentTime' => $startTime,
+			'startedAt' => $now, 'updatedAt' => $now,
+			'audioTracks' => [PodcastJson::audioTrack($podcast, $episode)],
+			'libraryItem' => $item,
+		];
+	}
+
 	private function getSession(string $userId, string $sid): ?array {
 		$qb = $this->db->getQueryBuilder();
 		$qb->select('*')->from(self::TABLE)
@@ -160,7 +196,10 @@ class SessionService {
 			->where($qb->expr()->eq('id', $qb->createNamedParameter((int)$s['id'], IQueryBuilder::PARAM_INT)));
 		$qb->executeStatement();
 
-		if ($num($body['currentTime'] ?? null)) {
+		if ($num($body['currentTime'] ?? null) && str_contains((string)$s['item_key'], '/')) {
+			[$pod, $ep] = explode('/', (string)$s['item_key'], 2);
+			$this->podcasts->apply($userId, $pod, $ep, ['currentTime' => $cur] + ($num($body['duration'] ?? null) ? ['duration' => (float)$body['duration']] : []));
+		} elseif ($num($body['currentTime'] ?? null)) {
 			$item = $this->catalog->item($userId, (string)$s['item_key']);
 			$dur = $num($body['duration'] ?? null) && (float)$body['duration'] > 0 ? (float)$body['duration'] : (float)($item['duration'] ?? 0);
 			if ($item !== null) {
@@ -181,6 +220,10 @@ class SessionService {
 	public function syncLocal(string $userId, array $s, array $deviceInfo): array {
 		$sid = is_string($s['id'] ?? null) ? mb_substr($s['id'], 0, 64) : '';
 		$key = is_scalar($s['libraryItemId'] ?? null) ? (string)$s['libraryItemId'] : '';
+		$episodeId = is_scalar($s['episodeId'] ?? null) ? (string)$s['episodeId'] : '';
+		if (PodcastService::isPodcastKey($key) && PodcastService::isEpisodeKey($episodeId)) {
+			return $this->syncLocalEpisode($userId, $sid, $key, $episodeId, $s);
+		}
 		$item = $key !== '' ? $this->catalog->item($userId, $key) : null;
 		if ($sid === '' || $item === null) {
 			return ['id' => $sid, 'success' => false, 'progressSynced' => false, 'error' => 'Media item not found'];
@@ -230,6 +273,33 @@ class SessionService {
 		], $dur);
 		$result['progressSynced'] = true;
 		return $result;
+	}
+
+	/** A session played offline in the app, of a podcast episode: the position goes to GPodderSync. */
+	private function syncLocalEpisode(string $userId, string $sid, string $key, string $episodeId, array $s): array {
+		$num = static fn ($v) => is_int($v) || is_float($v) || (is_string($v) && is_numeric($v));
+		if ($sid === '' || $this->podcasts->find($userId, $key, $episodeId) === null) {
+			return ['id' => $sid, 'success' => false, 'progressSynced' => false, 'error' => 'Media item not found'];
+		}
+		$updatedAt = $num($s['updatedAt'] ?? null) ? (int)$s['updatedAt'] : self::nowMs();
+		if ($this->getSession($userId, $sid) === null) {
+			$qb = $this->db->getQueryBuilder();
+			$qb->insert(self::TABLE)->values([
+				'session_id' => $qb->createNamedParameter($sid),
+				'user_id' => $qb->createNamedParameter($userId),
+				'item_key' => $qb->createNamedParameter($key . '/' . $episodeId),
+				'play_method' => $qb->createNamedParameter(3, IQueryBuilder::PARAM_INT),
+				'device_info' => $qb->createNamedParameter(json_encode(self::deviceInfo(is_array($s['deviceInfo'] ?? null) ? $s['deviceInfo'] : []))),
+				'started_at' => $qb->createNamedParameter($num($s['startedAt'] ?? null) ? (int)$s['startedAt'] : $updatedAt, IQueryBuilder::PARAM_INT),
+				'updated_at' => $qb->createNamedParameter($updatedAt, IQueryBuilder::PARAM_INT),
+				'time_listening' => $qb->createNamedParameter($num($s['timeListening'] ?? null) ? (float)$s['timeListening'] : 0.0),
+				'start_time' => $qb->createNamedParameter($num($s['startTime'] ?? null) ? (float)$s['startTime'] : 0.0),
+				'cur_time' => $qb->createNamedParameter($num($s['currentTime'] ?? null) ? (float)$s['currentTime'] : 0.0),
+			]);
+			$qb->executeStatement();
+		}
+		$ok = $this->podcasts->apply($userId, $key, $episodeId, array_intersect_key($s, array_flip(['currentTime', 'duration'])), $updatedAt);
+		return ['id' => $sid, 'success' => true, 'progressSynced' => $ok];
 	}
 
 	/** @return list<array> newest first */

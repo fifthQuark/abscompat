@@ -8,6 +8,7 @@ use OCA\AbsCompat\AppInfo\Application;
 use OCA\AbsCompat\Service\Catalog;
 use OCA\AbsCompat\Service\CoverService;
 use OCA\AbsCompat\Service\LibraryService;
+use OCA\AbsCompat\Service\Serializer;
 use OCP\AppFramework\Controller;
 use OCP\AppFramework\Http;
 use OCP\AppFramework\Http\Attribute\FrontpageRoute;
@@ -20,7 +21,10 @@ use OCP\AppFramework\Http\Response;
 use OCP\IRequest;
 use OCP\IUserSession;
 
-/** Finding covers for books without one. Session + CSRF token, like the rest of the library page. */
+/**
+ * Finding and choosing covers. A cover chosen here wins over the one in the book's files, which stays
+ * untouched and is shown again when the chosen one is removed. Session + CSRF token, like the page.
+ */
 class CoverController extends Controller {
 	private const MAX_UPLOAD = 15 * 1024 * 1024;
 
@@ -42,21 +46,27 @@ class CoverController extends Controller {
 		return new JSONResponse(['error' => $msg, 'code' => $code], $status);
 	}
 
-	/** The item, or an error response when it is unknown or has its own cover. */
+	/** The item, or an error response when it is unknown. */
 	private function book(string $id): array|JSONResponse {
 		$row = $this->catalog->item($this->uid(), $id);
 		if ($row === null) {
 			return self::error('Book not found', Http::STATUS_NOT_FOUND);
 		}
-		if (CoverService::hasOwnCover($row)) {
-			return self::error('This book has its own cover in its files', Http::STATUS_CONFLICT, 'own');
+		if (Serializer::isEbookOnly($row)) {
+			// Covers chosen here are made square, which suits audiobooks, not ebooks.
+			return self::error('Ebooks keep the cover of their file', Http::STATUS_CONFLICT, 'ebook');
 		}
 		return $row;
 	}
 
 	private function done(string $id, bool $found = true): JSONResponse {
 		$row = $this->catalog->item($this->uid(), $id);
-		return new JSONResponse(['found' => $found, 'hasCover' => $row !== null && $row['cover_cache'] !== null, 'updatedAt' => (int)($row['updated_at'] ?? 0)]);
+		return new JSONResponse([
+			'found' => $found,
+			'hasCover' => $row !== null && Serializer::hasCover($row),
+			'coverChosen' => $row !== null && CoverService::hasChosenCover($row),
+			'updatedAt' => (int)($row['updated_at'] ?? 0),
+		]);
 	}
 
 	#[NoAdminRequired]
@@ -143,8 +153,9 @@ class CoverController extends Controller {
 		if ($row instanceof JSONResponse) {
 			return $row;
 		}
-		if ($row['cover_cache'] !== null) {
-			return $this->done($id);
+		// Automatic lookups are only for books without any cover.
+		if (Serializer::hasCover($row)) {
+			return CoverService::hasOwnCover($row) ? self::error('This book has its own cover in its files', Http::STATUS_CONFLICT, 'own') : $this->done($id);
 		}
 		try {
 			return $this->done($id, $this->covers->auto($this->uid(), $row));
@@ -182,9 +193,10 @@ class CoverController extends Controller {
 		if ($row instanceof JSONResponse) {
 			return $row;
 		}
-		if ($row['cover_cache'] !== null) {
-			$this->library->setCustomCover($this->uid(), $id, null);
+		if (!CoverService::hasChosenCover($row)) {
+			return self::error('This cover is in the book\'s files and can only be changed', Http::STATUS_CONFLICT, 'own');
 		}
+		$this->library->setCustomCover($this->uid(), $id, null);
 		return $this->done($id, false);
 	}
 }

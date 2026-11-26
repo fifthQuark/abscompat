@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.0 – unreleased
+
+- Podcasts in the apps, from rePod: the podcasts you subscribed to in rePod (stored by GPodderSync)
+  are a library. Episodes play and download straight from the publisher. Where you are in an
+  episode is saved in GPodderSync, so rePod and AntennaPod see it, and the other way round.
+- A player on the library page, shown only when streaming is turned on.
+- Change the cover of a book that has one in its files. The file is not changed; removing the new
+  cover brings it back.
+
 ## 0.8.0 – 2026-11-26
 
 - Streaming in the Audiobookshelf app, off until you turn it on in the settings. Read the warning

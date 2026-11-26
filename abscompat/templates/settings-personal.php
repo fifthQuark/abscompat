@@ -44,6 +44,15 @@
 	</p>
 	<p class="settings-hint"><?php p($l->t('Voice uses the same address for downloading and streaming, so this switch does not stop it from streaming. Use its downloads instead.')); ?></p>
 
+	<div id="abscompat-podcasts" hidden>
+		<h3><?php p($l->t('Podcasts from rePod')); ?></h3>
+		<p class="settings-hint"><?php p($l->t('The podcasts you subscribed to in rePod (or another app that syncs with GPodderSync, like AntennaPod) show up in the apps as a library. Episodes play straight from the publisher, so streaming does not need to be on. Where you are in an episode is saved in GPodderSync, so rePod and AntennaPod see it too. Subscribe and unsubscribe in rePod.')); ?></p>
+		<p>
+			<input type="checkbox" id="abscompat-podcasts-on" class="checkbox">
+			<label for="abscompat-podcasts-on"><?php p($l->t('Show my podcasts in the apps')); ?></label>
+		</p>
+	</div>
+
 	<div id="abscompat-opds" hidden>
 		<h3><?php p($l->t('Ebooks from OPDS+')); ?></h3>
 		<p class="settings-hint"><?php p($l->t('OPDS+ is installed. Its book list is only read here; nothing in OPDS+ is changed.')); ?></p>

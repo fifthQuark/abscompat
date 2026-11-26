@@ -7,6 +7,7 @@ namespace OCA\AbsCompat\Controller;
 use OCA\AbsCompat\AppInfo\Application;
 use OCA\AbsCompat\Service\BookmarkService;
 use OCA\AbsCompat\Service\HiddenSeries;
+use OCA\AbsCompat\Service\PodcastApi;
 use OCA\AbsCompat\Service\LibraryService;
 use OCA\AbsCompat\Service\ProgressService;
 use OCA\AbsCompat\Service\Serializer;
@@ -38,6 +39,7 @@ class AuthController extends AbsBaseController {
 		private IRegistry $twoFactorRegistry,
 		private BookmarkService $bookmarks,
 		private HiddenSeries $hiddenSeries,
+		private PodcastApi $podcasts,
 	) {
 		parent::__construct($request, $tokens, $library);
 	}
@@ -78,8 +80,10 @@ class AuthController extends AbsBaseController {
 	private function loginPayload(IUser $user): array {
 		$uid = $user->getUID();
 		$libs = $this->library->getLibraries($uid);
+		$user = Serializer::user($uid, $user->getDisplayName(), $user->getEMailAddress(), $this->progress->allForUser($uid), $this->bookmarks->allForUser($uid), $this->hiddenSeries->get($uid));
+		$user['mediaProgress'] = array_merge($user['mediaProgress'], $this->podcasts->progress($uid));
 		return [
-			'user' => Serializer::user($uid, $user->getDisplayName(), $user->getEMailAddress(), $this->progress->allForUser($uid), $this->bookmarks->allForUser($uid), $this->hiddenSeries->get($uid)),
+			'user' => $user,
 			'userDefaultLibraryId' => $libs[0]['id'] ?? null,
 			'serverSettings' => Serializer::serverSettings($this->language()),
 			'ereaderDevices' => [],

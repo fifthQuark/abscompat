@@ -7,6 +7,7 @@ namespace OCA\AbsCompat\Controller;
 use OCA\AbsCompat\AppInfo\Application;
 use OCA\AbsCompat\Service\LibraryService;
 use OCA\AbsCompat\Service\OpdsLink;
+use OCA\AbsCompat\Service\PodcastService;
 use OCA\AbsCompat\Service\StreamingService;
 use OCA\AbsCompat\Service\TokenService;
 use OCP\AppFramework\Controller;
@@ -33,6 +34,7 @@ class SettingsController extends Controller {
 		private TokenService $tokens,
 		private StreamingService $streaming,
 		private OpdsLink $opds,
+		private PodcastService $podcasts,
 	) {
 		parent::__construct(Application::APP_ID, $request);
 	}
@@ -67,6 +69,7 @@ class SettingsController extends Controller {
 			'lastScan' => $this->library->getLastScan($uid),
 			'tokens' => $this->tokens->listForUser($uid),
 			'streaming' => ['allowed' => $this->streaming->isAllowed(), 'on' => $this->streaming->isOn($uid)],
+			'podcasts' => ['available' => $this->podcasts->available($uid), 'on' => $this->podcasts->isOn($uid)],
 			'opds' => ['available' => $this->opds->available($uid), 'links' => $this->opds->links($uid), 'library' => $this->opds->hasLibrary($uid)],
 		];
 	}
@@ -97,6 +100,15 @@ class SettingsController extends Controller {
 			return new JSONResponse(['error' => 'The administrator does not allow streaming'], Http::STATUS_FORBIDDEN);
 		}
 		$this->streaming->set($uid, $enabled);
+		return new JSONResponse($this->state($uid));
+	}
+
+	/** Podcasts from rePod (GPodderSync) in the apps. */
+	#[NoAdminRequired]
+	#[FrontpageRoute(verb: 'PUT', url: '/settings/podcasts')]
+	public function setPodcasts(bool $enabled = true): JSONResponse {
+		$uid = $this->uid();
+		$this->podcasts->set($uid, $enabled);
 		return new JSONResponse($this->state($uid));
 	}
 

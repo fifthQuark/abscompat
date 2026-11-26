@@ -15,6 +15,8 @@ use OCA\AbsCompat\Service\OpdsLink;
 use OCA\AbsCompat\Service\ProgressService;
 use OCA\AbsCompat\Service\Serializer;
 use OCA\AbsCompat\Service\SessionService;
+use OCA\AbsCompat\Service\StreamingService;
+use OCA\AbsCompat\Http\RangeFileResponse;
 use OCA\AbsCompat\Service\UploadService;
 use OCP\AppFramework\Controller;
 use OCP\AppFramework\Http;
@@ -24,6 +26,7 @@ use OCP\AppFramework\Http\Attribute\NoCSRFRequired;
 use OCP\AppFramework\Http\JSONResponse;
 use OCP\AppFramework\Http\Response;
 use OCP\IRequest;
+use OCP\IURLGenerator;
 use OCP\IUserSession;
 
 /** Data for the library page. Normal Nextcloud session + CSRF token, unlike the ABS API. */
@@ -40,6 +43,8 @@ class WebController extends Controller {
 		private BookmarkService $bookmarks,
 		private SessionService $sessions,
 		private OpdsLink $opds,
+		private StreamingService $streaming,
+		private IURLGenerator $urls,
 	) {
 		parent::__construct(Application::APP_ID, $request);
 	}
@@ -98,8 +103,10 @@ class WebController extends Controller {
 			'addedAt' => (int)$r['added_at'],
 			'updatedAt' => (int)$r['updated_at'],
 			'hasCover' => Serializer::hasCover($r),
-			// Covers in the book's files can't be changed here.
-			'coverEditable' => !CoverService::hasOwnCover($r),
+			'coverEditable' => !Serializer::isEbookOnly($r),
+			// Chosen in the app: removing it brings back the one in the files, if there is one.
+			'coverChosen' => CoverService::hasChosenCover($r),
+			'coverInFiles' => CoverService::hasOwnCover($r),
 			'hasEbook' => Serializer::ebooks($r) !== [],
 			'progress' => $p === null ? null : [
 				'progress' => !empty($extra['ebookOnly']) ? max((float)$p['progress'], (float)$p['ebook_progress']) : (float)$p['progress'],
@@ -142,6 +149,8 @@ class WebController extends Controller {
 		return new JSONResponse([
 			'lists' => array_map(fn ($l) => self::listJson($l), array_merge($this->lists->all($uid, ListService::COLLECTION), $this->lists->all($uid, ListService::PLAYLIST))),
 			'opds' => $this->opds->links($uid),
+			// The player on the page streams, so it is there only when streaming is on.
+			'streaming' => $this->streaming->isOn($uid),
 			'covers' => ['auto' => $this->covers->isAuto($uid), 'online' => $this->covers->online()],
 			'libraries' => $libraries,
 			'books' => array_map(static fn ($r) => self::book($r, $progress), $this->catalog->visibleRows($uid)),
@@ -240,6 +249,68 @@ class WebController extends Controller {
 			}
 		}
 		return new JSONResponse(['books' => $out]);
+	}
+
+	// ----- the player (only with streaming on) -----
+
+	private function streamingOff(): JSONResponse {
+		return self::error('Streaming is off. Turn it on in Settings, Audiobookshelf, to play here.', Http::STATUS_FORBIDDEN, 'streaming');
+	}
+
+	/** Start listening: a playback session, like the apps open one, and the addresses of the audio. */
+	#[NoAdminRequired]
+	#[FrontpageRoute(verb: 'POST', url: '/web/items/{id}/play')]
+	public function play(string $id): JSONResponse {
+		$uid = $this->uid();
+		if (!$this->streaming->isOn($uid)) {
+			return $this->streamingOff();
+		}
+		$row = $this->catalog->item($uid, $id);
+		if ($row === null || Serializer::isEbookOnly($row)) {
+			return self::error('Book not found', Http::STATUS_NOT_FOUND);
+		}
+		$s = $this->sessions->start($uid, $row, ['deviceId' => 'nextcloud-web', 'clientName' => 'Nextcloud', 'manufacturer' => 'Browser'], 'web');
+		return new JSONResponse([
+			'sessionId' => $s['id'],
+			'startTime' => $s['startTime'],
+			'duration' => $s['duration'],
+			'chapters' => $s['chapters'],
+			'tracks' => array_map(fn ($t) => [
+				'start' => $t['startOffset'],
+				'duration' => $t['duration'],
+				'url' => $this->urls->linkToRoute('abscompat.web.audio', ['id' => $id, 'fileId' => basename($t['contentUrl'])]),
+			], $s['audioTracks']),
+		]);
+	}
+
+	/** Audio for the player. Only a book's audio files, and only while streaming is on. */
+	#[NoAdminRequired]
+	#[NoCSRFRequired]
+	#[FrontpageRoute(verb: 'GET', url: '/web/items/{id}/audio/{fileId}')]
+	public function audio(string $id, string $fileId): Response {
+		$uid = $this->uid();
+		if (!$this->streaming->isOn($uid)) {
+			return $this->streamingOff();
+		}
+		$row = $this->catalog->item($uid, $id);
+		$tracks = $row === null ? [] : array_map(static fn ($t) => (string)$t['file_id'], $this->library->getTrackRows((int)$row['id']));
+		$file = in_array($fileId, $tracks, true) ? $this->library->getItemFile($uid, $row, (int)$fileId) : null;
+		if ($file === null) {
+			return self::error('File not found', Http::STATUS_NOT_FOUND);
+		}
+		$range = $this->request->getHeader('Range');
+		return new RangeFileResponse(fn () => $file->fopen('rb'), (int)$file->getSize(), LibraryService::mimeFor($file->getName()), null, $range !== '' ? $range : null,
+			strtoupper($this->request->getMethod()) === 'HEAD', (int)$file->getMTime());
+	}
+
+	/** Where the player is, every few seconds and when it stops. Moves the listening position like the apps. */
+	#[NoAdminRequired]
+	#[FrontpageRoute(verb: 'POST', url: '/web/sessions/{id}/sync')]
+	public function syncSession(string $id, float $currentTime = -1, float $timeListened = 0, bool $close = false): JSONResponse {
+		if ($currentTime < 0 || !$this->sessions->sync($this->uid(), $id, ['currentTime' => $currentTime, 'timeListened' => max(0.0, min($timeListened, 600.0))], $close)) {
+			return self::error('Session not found', Http::STATUS_NOT_FOUND);
+		}
+		return new JSONResponse([]);
 	}
 
 	// ----- playlists and collections -----

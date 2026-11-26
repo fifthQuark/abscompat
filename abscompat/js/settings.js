@@ -142,6 +142,8 @@
 		$('#abscompat-streaming').checked = state.streaming.on
 		$('#abscompat-streaming-row').hidden = !state.streaming.allowed
 		$('#abscompat-streaming-forbidden').hidden = state.streaming.allowed
+		$('#abscompat-podcasts').hidden = !state.podcasts.available
+		$('#abscompat-podcasts-on').checked = state.podcasts.on
 		$('#abscompat-opds').hidden = !state.opds.available
 		$('#abscompat-opds-links').checked = state.opds.links
 		$('#abscompat-opds-library').checked = state.opds.library
@@ -262,6 +264,14 @@
 				(ok) => ok && setStreaming(true),
 				true,
 			)
+		})
+		$('#abscompat-podcasts-on').addEventListener('change', async (ev) => {
+			try {
+				state = await api('PUT', '/settings/podcasts', { enabled: ev.target.checked })
+			} catch (e) {
+				toast(e.message, true)
+			}
+			renderOptions()
 		})
 		for (const id of ['#abscompat-opds-links', '#abscompat-opds-library']) {
 			$(id).addEventListener('change', async () => {

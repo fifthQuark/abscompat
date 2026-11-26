@@ -8,7 +8,11 @@ use OCA\AbsCompat\Http\CoverFile;
 use OCA\AbsCompat\Http\RangeFileResponse;
 use OCA\AbsCompat\Service\Catalog;
 use OCA\AbsCompat\Service\LibraryService;
+use OCA\AbsCompat\Service\PodcastApi;
+use OCA\AbsCompat\Service\PodcastJson;
+use OCA\AbsCompat\Service\PodcastService;
 use OCA\AbsCompat\Service\Serializer;
+use OCP\AppFramework\Http\RedirectResponse;
 use OCA\AbsCompat\Service\SessionService;
 use OCA\AbsCompat\Service\StreamingService;
 use OCA\AbsCompat\Service\TokenService;
@@ -28,6 +32,7 @@ class ItemController extends AbsBaseController {
 		private Catalog $catalog,
 		private SessionService $sessions,
 		private StreamingService $streaming,
+		private PodcastApi $podcasts,
 	) {
 		parent::__construct($request, $tokens, $library);
 	}
@@ -39,6 +44,10 @@ class ItemController extends AbsBaseController {
 		$uid = $this->currentUser();
 		if ($uid === null) {
 			return $this->unauthorized();
+		}
+		if (PodcastService::isPodcastKey($id)) {
+			$item = $this->podcasts->item($uid, $id);
+			return $item === null ? $this->notFound('Library item not found') : new JSONResponse($item);
 		}
 		$row = $this->catalog->item($uid, $id);
 		if ($row === null) {
@@ -157,6 +166,10 @@ class ItemController extends AbsBaseController {
 		if ($uid === null) {
 			return $this->unauthorized();
 		}
+		if (PodcastService::isPodcastKey($id)) {
+			$image = $this->podcasts->coverUrl($uid, $id);
+			return $image === null ? $this->notFound('Cover not found') : new RedirectResponse($image);
+		}
 		$row = $this->catalog->item($uid, $id);
 		if ($row === null) {
 			return $this->notFound();
@@ -172,6 +185,9 @@ class ItemController extends AbsBaseController {
 		$uid = $this->currentUser(true);
 		if ($uid === null) {
 			return $this->unauthorized();
+		}
+		if (PodcastService::isPodcastKey($id)) {
+			return $this->episodeAudio($uid, $id, $fileId);
 		}
 		$row = $this->catalog->item($uid, $id);
 		if ($row === null || !ctype_digit($fileId)) {
@@ -196,7 +212,7 @@ class ItemController extends AbsBaseController {
 	#[FrontpageRoute(verb: 'GET', url: '/api/items/{id}/file/{fileId}')]
 	public function file(string $id, string $fileId): Response {
 		// With the token in the address it is a player's link. Apps that download send it as a header.
-		if ($this->request->getHeader('Authorization') === '') {
+		if ($this->request->getHeader('Authorization') === '' && !PodcastService::isPodcastKey($id)) {
 			$uid = $this->currentUser(true);
 			if ($uid !== null && !$this->streaming->isOn($uid)) {
 				return $this->streamingOff();
@@ -229,6 +245,10 @@ class ItemController extends AbsBaseController {
 		if ($session === null || !$this->tokens->isActiveUser($uid)) {
 			return $this->notFound('Session not found');
 		}
+		if (str_contains((string)$session['item_key'], '/')) {
+			[$pod, $ep] = explode('/', (string)$session['item_key'], 2);
+			return (int)$index === 1 ? $this->episodeAudio($uid, $pod, $ep) : $this->notFound('Track not found');
+		}
 		if (!$this->streaming->isOn($uid)) {
 			return $this->streamingOff();
 		}
@@ -239,6 +259,34 @@ class ItemController extends AbsBaseController {
 			}
 		}
 		return $this->notFound('Track not found');
+	}
+
+	/**
+	 * Episodes are not on this server: the app is sent to the publisher, as rePod plays them. That costs
+	 * this server no bandwidth, so it is allowed without streaming.
+	 */
+	private function episodeAudio(string $uid, string $id, string $episodeId): Response {
+		$url = $this->podcasts->audioUrl($uid, $id, $episodeId);
+		return $url === null ? $this->notFound('Episode not found') : new RedirectResponse($url);
+	}
+
+	#[PublicPage]
+	#[NoCSRFRequired]
+	#[FrontpageRoute(verb: 'POST', url: '/api/items/{id}/play/{episodeId}')]
+	public function playEpisode(string $id, string $episodeId): JSONResponse {
+		$uid = $this->currentUser();
+		if ($uid === null) {
+			return $this->unauthorized();
+		}
+		$x = $this->podcasts->find($uid, $id, $episodeId);
+		if ($x === null) {
+			return $this->notFound('Episode not found');
+		}
+		$body = $this->body();
+		$start = (float)($this->podcasts->getProgress($uid, $id, $episodeId)['currentTime'] ?? 0);
+		$p = $this->podcasts->getProgress($uid, $id, $episodeId);
+		return new JSONResponse($this->sessions->startEpisode($uid, $x[0], $x[1], $p !== null && !$p['isFinished'] ? $start : 0.0,
+			is_array($body['deviceInfo'] ?? null) ? $body['deviceInfo'] : [], is_string($body['mediaPlayer'] ?? null) ? $body['mediaPlayer'] : 'unknown'));
 	}
 
 	#[PublicPage]

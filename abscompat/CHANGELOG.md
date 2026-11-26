@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.9.0 – unreleased
+## 0.9.0 – 2026-11-26
 
 - Podcasts in the apps, from rePod: the podcasts you subscribed to in rePod (stored by GPodderSync)
   are a library. Episodes play and download straight from the publisher. Where you are in an

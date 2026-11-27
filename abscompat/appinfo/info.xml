@@ -32,7 +32,7 @@
 
 This app is not affiliated with the Audiobookshelf project.
 ]]></description>
-    <version>0.9.0</version>
+    <version>0.9.1</version>
     <licence>agpl</licence>
     <author>abscompat contributors</author>
     <namespace>AbsCompat</namespace>

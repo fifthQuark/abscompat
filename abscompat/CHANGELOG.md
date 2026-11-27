@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.1 – 2026-11-27
 
 - "Hide from Continue Listening" works for podcast episodes. The episode comes back once it is
   played again, in the apps, rePod or AntennaPod. GPodderSync's data is not changed.

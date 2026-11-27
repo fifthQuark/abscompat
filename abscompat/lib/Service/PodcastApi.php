@@ -8,6 +8,7 @@ namespace OCA\AbsCompat\Service;
 class PodcastApi {
 	public function __construct(
 		private PodcastService $podcasts,
+		private HiddenEpisodes $hidden,
 	) {
 	}
 
@@ -40,17 +41,21 @@ class PodcastApi {
 		if (!$this->isOn($userId)) {
 			return [];
 		}
-		return array_map(static fn ($x) => PodcastJson::progress($userId, ...$x), $this->played($userId));
+		return array_map(fn ($x) => PodcastJson::progress($userId, ...$x, hidden: $this->hidden($userId, ...$x)), $this->played($userId));
 	}
 
-	/** Episodes started and not finished, as items with recentEpisode. */
+	private function hidden(string $userId, array $p, array $e, ?array $a): bool {
+		return $this->hidden->isHidden($userId, $p['id'], $e['id'], $a);
+	}
+
+	/** Episodes started, not finished and not hidden, as items with recentEpisode. */
 	public function inProgress(string $userId, int $limit): array {
 		if (!$this->isOn($userId)) {
 			return [];
 		}
 		$out = [];
 		foreach ($this->played($userId) as [$p, $e, $a]) {
-			if ($a['position'] > 0 && !PodcastService::finished($a) && count($out) < $limit) {
+			if ($a['position'] > 0 && !PodcastService::finished($a) && !$this->hidden($userId, $p, $e, $a) && count($out) < $limit) {
 				$out[] = PodcastJson::withEpisode($p, $e) + ['progressLastUpdate' => $a['at'] * 1000];
 			}
 		}
@@ -156,7 +161,7 @@ class PodcastApi {
 	public function getProgress(string $userId, string $key, string $episodeId): ?array {
 		$x = $this->find($userId, $key, $episodeId);
 		$a = $x === null ? null : $this->podcasts->position($userId, $x[1]);
-		return $a === null ? null : PodcastJson::progress($userId, $x[0], $x[1], $a);
+		return $a === null ? null : PodcastJson::progress($userId, $x[0], $x[1], $a, $this->hidden($userId, $x[0], $x[1], $a));
 	}
 
 	/**
@@ -173,6 +178,15 @@ class PodcastApi {
 		if ($updatedAt !== null && $old !== null && $old['at'] * 1000 > $updatedAt) {
 			return true;
 		}
+		if (array_key_exists('hideFromContinueListening', $body)) {
+			$hide = filter_var($body['hideFromContinueListening'], FILTER_VALIDATE_BOOLEAN);
+			$rest = array_diff_key($body, ['hideFromContinueListening' => 1, 'lastUpdate' => 1]);
+			$ok = $rest === [] || $this->apply($userId, $key, $episodeId, $rest, $updatedAt);
+			if ($ok) {
+				$this->hidden->set($userId, $p['id'], $e['id'], $this->podcasts->position($userId, $e), $hide);
+			}
+			return $ok;
+		}
 		$num = static fn ($v) => is_int($v) || is_float($v) || (is_string($v) && is_numeric($v));
 		$total = $num($body['duration'] ?? null) && (float)$body['duration'] > 0 ? (float)$body['duration'] : (float)($old['total'] ?? 0 ?: $e['duration']);
 		$finished = array_key_exists('isFinished', $body) && $body['isFinished'] !== null
@@ -187,6 +201,17 @@ class PodcastApi {
 			$finished = true;
 		}
 		return $this->podcasts->save($userId, $p, $e, $pos, $total, $finished);
+	}
+
+	/** "Remove from continue listening"; false when the episode has no position to hide. */
+	public function hide(string $userId, string $key, string $episodeId): bool {
+		$x = $this->find($userId, $key, $episodeId);
+		$a = $x === null ? null : $this->podcasts->position($userId, $x[1]);
+		if ($a === null) {
+			return false;
+		}
+		$this->hidden->set($userId, $x[0]['id'], $x[1]['id'], $a, true);
+		return true;
 	}
 
 	/** "Reset progress" in the apps: back to the start. */

@@ -144,7 +144,7 @@ final class PodcastJson {
 	}
 
 	/** GPodderSync's position as ABS media progress. */
-	public static function progress(string $userId, array $p, array $e, array $a): array {
+	public static function progress(string $userId, array $p, array $e, array $a, bool $hidden = false): array {
 		$total = (float)($a['total'] ?: $e['duration']);
 		$done = PodcastService::finished($a);
 		$ms = $a['at'] * 1000;
@@ -159,7 +159,7 @@ final class PodcastJson {
 			'progress' => $done ? 1.0 : ($total > 0 ? min(1.0, $a['position'] / $total) : 0.0),
 			'currentTime' => (float)min($a['position'], $total ?: $a['position']),
 			'isFinished' => $done,
-			'hideFromContinueListening' => false,
+			'hideFromContinueListening' => $hidden,
 			'ebookLocation' => null,
 			'ebookProgress' => null,
 			'lastUpdate' => $ms,

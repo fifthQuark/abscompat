@@ -116,6 +116,9 @@ class MeController extends AbsBaseController {
 			return $this->unauthorized();
 		}
 		$key = str_starts_with($id, 'mp_') ? substr($id, 3) : $id;
+		if (preg_match('/^(p[0-9a-f]{12})-(e[0-9a-f]{12})$/D', $key, $m)) {
+			return $this->podcasts->hide($uid, $m[1], $m[2]) ? $this->me() : $this->notFound('Progress not found');
+		}
 		$p = $this->progress->get($uid, $key);
 		if ($p === null) {
 			return $this->notFound('Progress not found');

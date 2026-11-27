@@ -78,6 +78,26 @@ try {
     const going = (await api('GET', '/api/me/items-in-progress')).json.libraryItems
     assert.deepEqual(going.filter((i) => i.recentEpisode).map((i) => i.recentEpisode.id), [ep2().id])
   })
+  await check('an episode can be taken off Continue Listening, and comes back when played', async () => {
+    const id = `mp_${pod.id}-${ep2().id}`
+    const progress = async () => (await api('GET', '/api/me')).json.mediaProgress.find((m) => m.episodeId === ep2().id)
+    const going = async () => (await api('GET', '/api/me/items-in-progress')).json.libraryItems.filter((i) => i.recentEpisode).map((i) => i.recentEpisode.id)
+    const shelf = async () => (await api('GET', '/api/libraries/podcasts/personalized')).json.find((s) => s.id === 'continue-listening')?.entities.map((i) => i.recentEpisode.id) ?? []
+    const r = await api('GET', `/api/me/progress/${id}/remove-from-continue-listening`)
+    assert.equal(r.status, 200)
+    assert.equal(r.json.mediaProgress.find((m) => m.id === id).hideFromContinueListening, true, 'answers with the user, as ABS does')
+    assert.deepEqual([await going(), await shelf()], [[], []])
+    assert.equal((await api('GET', `/api/me/progress/${pod.id}/${ep2().id}`)).json.hideFromContinueListening, true)
+    assert.deepEqual((await positions())['https://media.example.org/ep2.mp3'], [40, 200], 'GPodderSync is not touched')
+    assert.equal((await api('GET', `/api/me/progress/mp_${pod.id}-${eps[0].id}/remove-from-continue-listening`)).status, 404, 'nothing to hide without a position')
+    await api('PATCH', `/api/me/progress/${pod.id}/${ep2().id}`, { currentTime: 45, duration: 200 })
+    assert.equal((await progress()).hideFromContinueListening, false)
+    assert.deepEqual([await going(), await shelf()], [[ep2().id], [ep2().id]])
+    await api('PATCH', `/api/me/progress/${pod.id}/${ep2().id}`, { hideFromContinueListening: true })
+    assert.deepEqual(await going(), [])
+    await api('PATCH', `/api/me/progress/${pod.id}/${ep2().id}`, { hideFromContinueListening: false, currentTime: 40 })
+    assert.deepEqual([(await progress()).hideFromContinueListening, (await progress()).currentTime, await going()], [false, 40, [ep2().id]])
+  })
   await check('positions from the app are saved in GPodderSync, as AntennaPod reads them', async () => {
     assert.equal((await api('PATCH', `/api/me/progress/${pod.id}/${eps[0].id}`, { currentTime: 50, duration: 200, progress: 0.25 })).status, 200)
     assert.deepEqual((await positions())['https://media.example.org/ep3.mp3'], [50, 200])
